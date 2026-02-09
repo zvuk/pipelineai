@@ -1,0 +1,78 @@
+## Пример: matrix + кастомная функция http_request.
+## Демонстрирует: генерацию manifest LLM’ом и проверку каждого эндпоинта через функцию.
+version: 1
+agent:
+  name: "pipelineai matrix demo"
+  artifact_dir: ".agent/artifacts"
+
+functions:
+  - name: http_request
+    description: "HTTP вызов через curl"
+    prompt: |
+      Tool: http_request
+      Use this tool to perform HTTP calls. Always pass method and url. Prefer GET without a body unless specified. Return only the response body unless instructed otherwise.
+    parameters:
+      type: object
+      properties:
+        url: { type: string }
+        method:
+          type: string
+          enum: [GET, POST, PUT, PATCH, DELETE]
+        headers:
+          type: array
+          items: { type: string }
+        data: { type: string }
+      required: [url, method]
+    implementation:
+      type: shell
+      shell_template: |
+        set -euo pipefail
+        curl -sS -X "{{ .params.method }}" \
+        {{- range $h := .params.headers }} -H "{{$h}}" \{{ end }}
+        {{- if .params.data }} --data '{{ .params.data }}' \{{ end }}
+        "{{ .params.url }}"
+
+steps:
+  - id: produce_manifest
+    type: llm
+    name: "Собрать manifest ручек"
+    system_prompt: |
+      Ты — инженер качества. Проанализируй OpenAPI и сформируй manifest HTTP-ручек.
+    user_prompt: |
+      Найди ключевые эндпоинты и опиши их как `id`, `method`, `url` и `description`.
+    outputs:
+      - id: manifest
+        type: file
+        from: llm_text
+        format: yaml
+        path: "{{ .agent.artifact_dir }}/plan/endpoints.yaml"
+
+  - id: run_per_endpoint
+    type: matrix
+    name: "Проверка каждой ручки"
+    needs: [produce_manifest]
+    matrix:
+      from_yaml: "{{ .outputs.produce_manifest.manifest.path }}"
+      select: items
+      item_id: "{{ printf "%s-%s" .item.method .item.id }}"
+      inject:
+        endpoint_url: "{{ .item.url }}"
+        endpoint_method: "{{ .item.method }}"
+    run:
+      step: verify_endpoint
+
+  - id: verify_endpoint
+    type: llm
+    template: true
+    name: "LLM-проверка эндпоинта"
+    tools_allowed: ["http_request"]
+    system_prompt: |
+      Ты — инженер по тестированию API. Используй функцию http_request, чтобы проверить ручку.
+    user_prompt: |
+      Проверь ручку {{ .matrix.endpoint_method }} {{ .matrix.endpoint_url }}. Убедись, что ответ содержит успешный статус.
+      Верни краткий отчёт в Markdown с результатами и найденными проблемами.
+    outputs:
+      - id: report
+        type: file
+        from: llm_text
+        path: "{{ .agent.artifact_dir }}/items/{{ .matrix.item_id }}/report.md"

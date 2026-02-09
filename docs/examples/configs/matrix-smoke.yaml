@@ -1,0 +1,36 @@
+## Пример: matrix + template.
+## Демонстрирует: разворот по статическому manifest и шаблонный шаг per item.
+version: 1
+agent:
+  name: "pipelineai matrix smoke"
+  artifact_dir: ".agent/artifacts"
+
+steps:
+  - id: run_per_item
+    type: matrix
+    name: "Прогон по статическому manifest"
+    matrix:
+      from_yaml: "docs/examples/configs/plan/manifest.yaml"
+      select: items
+      item_id: "{{ printf \"%s-%s\" .item.method .item.id }}"
+      inject:
+        endpoint_url: "{{ .item.url }}"
+        endpoint_method: "{{ .item.method }}"
+    run:
+      step: per_item_template
+
+  - id: per_item_template
+    type: shell
+    template: true
+    name: "Шаблон shell на элемент"
+    shell:
+      run: |
+        set -euo pipefail
+        mkdir -p "{{ .agent.artifact_dir }}/items/{{ .matrix.item_id }}"
+        echo "Method: {{ .matrix.endpoint_method }} URL: {{ .matrix.endpoint_url }}" > "{{ .agent.artifact_dir }}/items/{{ .matrix.item_id }}/report.txt"
+      dir: "."
+    outputs:
+      - id: report
+        type: file
+        from: command_stdout
+        path: "{{ .agent.artifact_dir }}/items/{{ .matrix.item_id }}/stdout.txt"

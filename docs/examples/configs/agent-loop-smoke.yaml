@@ -1,0 +1,20 @@
+## Пример: agent-loop smoke.
+## Демонстрирует: простой вызов модели и запись ответа в артефакт.
+version: 1
+agent:
+  name: "pipelineai smoke"
+  artifact_dir: ".agent/artifacts"
+steps:
+  - id: agent_loop_smoke
+    type: llm
+    name: "Smoke: agent loop"
+    system_prompt: |
+      You are a concise assistant. Reply in one short sentence.
+    user_prompt: |
+      Say hello and mention that this is an agent-loop smoke test.
+    outputs:
+      - id: reply
+        type: file
+        from: llm_text
+        format: md
+        path: "{{ .agent.artifact_dir }}/smoke/agent-loop-reply.md"

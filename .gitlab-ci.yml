@@ -1,0 +1,113 @@
+stages:
+  - test
+  - sync
+
+unit_tests:
+  stage: test
+  tags:
+    - stage
+  image: golang:1.25.1-bookworm
+  variables:
+    GOPATH: "$CI_PROJECT_DIR/.go"
+  script:
+    - mkdir -p .go
+    - go mod download
+    - go test ./...
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: on_success
+    - when: never
+
+smoke:
+  stage: test
+  tags:
+    - stage
+  image: golang:1.25.1-bookworm
+  variables:
+    GOPATH: "$CI_PROJECT_DIR/.go"
+  script:
+    - mkdir -p .go
+    - go mod download
+    - make run-smoke
+    - make run-agent-loop ARTIFACT_DIR=.agent/test-artifacts RUN_FLAGS="--timeout 90s"
+    - make run-step ARTIFACT_DIR=.agent/test-artifacts RUN_FLAGS="--timeout 120s"
+    - make run-smoke-tools ARTIFACT_DIR=.agent/test-artifacts RUN_FLAGS="--timeout 120s"
+    - make run-smoke-functions ARTIFACT_DIR=.agent/test-artifacts RUN_FLAGS="--timeout 120s"
+    - make run-smoke-dag-io ARTIFACT_DIR=.agent/test-artifacts RUN_FLAGS="--timeout 120s"
+    - make run-smoke-matrix ARTIFACT_DIR=.agent/test-artifacts RUN_FLAGS="--timeout 60s"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: on_success
+    - when: never
+
+"🚀 Опубликовать в gitverse, github, прогреть proxy.golang.org":
+  stage: sync
+  tags:
+    - stage
+  image: golang:1.25.1-bookworm
+  variables:
+    GIT_STRATEGY: clone
+    GIT_DEPTH: "0"
+  before_script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends git ca-certificates curl
+  script:
+    - test -n "$GITVERSE_REPO_URL"
+    - test -n "$GITVERSE_USERNAME"
+    - test -n "$GITVERSE_TOKEN"
+    - test -n "$GITHUB_REPO_URL"
+    - test -n "$GITHUB_USERNAME"
+    - test -n "$GITHUB_TOKEN"
+    - git fetch origin master --tags
+    - git branch -r --contains "$CI_COMMIT_SHA" | grep -q "origin/master$"
+    - git config user.name "${GITLAB_USER_NAME:-gitlab-ci}"
+    - git config user.email "${GITLAB_USER_EMAIL:-gitlab-ci@example.com}"
+    - GITVERSE_CLEAN_URL="$(echo "$GITVERSE_REPO_URL" | sed -E 's#^https?://##')"
+    - GITHUB_CLEAN_URL="$(echo "$GITHUB_REPO_URL" | sed -E 's#^https?://##')"
+    - git remote remove gitverse || true
+    - git remote remove github || true
+    - git remote add gitverse "https://${GITVERSE_USERNAME}:${GITVERSE_TOKEN}@${GITVERSE_CLEAN_URL}"
+    - git remote add github "https://${GITHUB_USERNAME}:${GITHUB_TOKEN}@${GITHUB_CLEAN_URL}"
+    - git push --force gitverse "$CI_COMMIT_SHA:master"
+    - git push --force github "$CI_COMMIT_SHA:master"
+    - git push --force gitverse --tags
+    - git push --force github --tags
+    - MODULE="$(echo "$GITHUB_REPO_URL" | sed -E 's#^https?://##; s#\.git$##')"
+    - |
+      tags="$(git tag --list)"
+      if [ -z "$tags" ]; then
+        echo "Теги отсутствуют, прогрев proxy.golang.org не требуется"
+        exit 0
+      fi
+
+      for tag in $tags; do
+        info_url="https://proxy.golang.org/${MODULE}/@v/${tag}.info"
+        if curl --fail --show-error --silent "$info_url" >/dev/null; then
+          echo "Тег $tag уже есть в proxy.golang.org"
+          continue
+        fi
+
+        echo "Тег $tag отсутствует в proxy.golang.org, инициирую публикацию и прогрев"
+        GOPROXY=direct GOSUMDB=sum.golang.org go list -m "${MODULE}@${tag}" >/dev/null
+
+        for ext in info mod zip; do
+          url="https://proxy.golang.org/${MODULE}/@v/${tag}.${ext}"
+          ok=0
+          for i in 1 2 3 4 5 6; do
+            if curl --fail --show-error --silent "$url" >/dev/null; then
+              ok=1
+              break
+            fi
+            sleep 5
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "Не удалось прогреть $url"
+            exit 1
+          fi
+        done
+      done
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master"'
+      when: manual
+      allow_failure: false
+    - when: never

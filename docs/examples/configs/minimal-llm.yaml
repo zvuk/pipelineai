@@ -1,0 +1,22 @@
+## Пример: минимальная конфигурация с одним LLM-шагом.
+## Демонстрирует: запуск шага type=llm, сохранение manifest в артефакты.
+version: 1
+agent:
+  name: "pipelineai minimal"
+  artifact_dir: ".agent/artifacts"
+  reasoning: true
+steps:
+  - id: produce_manifest
+    type: llm
+    name: "Первичный анализ"
+    system_prompt: |
+      Ты — инженер автоматизации. Проанализируй проект и составь manifest задач.
+    user_prompt: |
+      Найди ключевые модули и сформируй YAML со списком элементов для дальнейшей обработки.
+    tools_allowed: [ "shell" ]
+    outputs:
+      - id: manifest
+        type: file
+        from: llm_text
+        format: yaml
+        path: "{{ .agent.artifact_dir }}/plan/manifest.yaml"

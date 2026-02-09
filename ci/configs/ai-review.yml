@@ -1,0 +1,878 @@
+version: 1
+
+agent:
+  name: pai-ai-review
+  model: '{{ env "LLM_MODEL" "openai/gpt-oss-20b" }}'
+  artifact_dir: .agent/artifacts
+  openai:
+    base_url: '{{ env "LLM_BASE_URL" "http://localhost:1234/v1" }}'
+    api_key_env: LLM_API_KEY
+
+defaults:
+  scenario_timeout: 120m
+  step_timeout: 120m
+  tool_timeout: 120s
+
+functions:
+  # Возвращает дифф по конкретному файлу из pr-context.json.
+  - name: github_get_file_diff
+    description: "Get unified diff (patch) for a single file from PR context JSON."
+    prompt: |
+      Tool: github_get_file_diff
+      Use this tool to fetch the unified diff (patch) for a single file from the local PR context JSON.
+      Always pass the full relative path of the file as it appears in Git (for example: internal/foo/bar.go).
+      The tool returns a JSON object { "file_path": string, "diff": string }.
+      If the file is not found in PR changes, the tool returns { "error": "<message>" }.
+    parameters:
+      type: object
+      properties:
+        file_path:
+          type: string
+          description: "Relative path of the file in the repository."
+      required: [file_path]
+    implementation:
+      type: shell
+      shell_template: |
+        set -euo pipefail
+
+        CONTEXT="{{ .agent.artifact_dir }}/plan/pr-context.json"
+        echo "DEBUG: github_get_file_diff: CONTEXT=$CONTEXT, FILE_PATH={{ .params.file_path }}" >&2
+        FILE={{ shq .params.file_path }}
+
+        if [ ! -f "$CONTEXT" ]; then
+          echo "ERROR: github_get_file_diff: pr-context.json not found at path: $CONTEXT" >&2
+          echo '{"error":"pr-context.json not found"}'
+          exit 1
+        fi
+
+        jq -c --arg file "$FILE" '
+          .changes
+          | map(select(.file_path == $file))
+          | if length > 0 then
+              { file_path: .[0].file_path, diff: .[0].diff }
+            else
+              {
+                error: "file not found in PR changes. Make sure to pass file_path exactly as in Git diff, for example: \"internal/foo/bar.go\""
+              }
+            end
+        ' "$CONTEXT"
+
+  # Создаёт inline‑комментарий в PR через GitHub API.
+  - name: github_post_inline_comment
+    description: "Post an inline code review comment to a specific line in a file in the current pull request."
+    prompt: |
+      Tool: github_post_inline_comment
+      Use this tool to post an inline code review comment on a specific line of a file in the current pull request.
+      Arguments:
+        - file_path: relative path of the file in the repository.
+        - line: 1-based line number in the NEW version of the file.
+        - body: Markdown-formatted comment body.
+      The tool posts a PR review comment (side=RIGHT).
+      The tool returns a JSON object with a basic status.
+    parameters:
+      type: object
+      properties:
+        file_path:
+          type: string
+        line:
+          type: integer
+          minimum: 1
+        body:
+          type: string
+      required: [file_path, line, body]
+    implementation:
+      type: shell
+      shell_template: |
+        set -euo pipefail
+
+        CONTEXT="{{ .agent.artifact_dir }}/plan/pr-context.json"
+
+        if [ ! -f "$CONTEXT" ]; then
+          echo "ERROR: github_post_inline_comment: pr-context.json not found at path: $CONTEXT" >&2
+          echo '{"error":"pr-context.json not found"}'
+          exit 1
+        fi
+        if [ -z "${GITHUB_TOKEN:-}" ]; then
+          echo "ERROR: github_post_inline_comment: GITHUB_TOKEN is not set" >&2
+          echo '{"error":"GITHUB_TOKEN is not set"}'
+          exit 1
+        fi
+
+        GITHUB_API_URL_EFFECTIVE="${GITHUB_API_URL:-https://api.github.com}"
+
+        REPO="${GITHUB_REPOSITORY:-}"
+        if [ -z "$REPO" ]; then
+          REPO="$(jq -r '.repository // empty' "$CONTEXT")"
+        fi
+        if [ -z "$REPO" ] || [ "$REPO" = "null" ]; then
+          echo "ERROR: github_post_inline_comment: repository is not set (GITHUB_REPOSITORY or pr-context.json.repository)" >&2
+          echo '{"error":"repository is not set"}'
+          exit 1
+        fi
+
+        PR_NUMBER="$(jq -r '.pull_number // empty' "$CONTEXT")"
+        if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "null" ]; then
+          echo "ERROR: github_post_inline_comment: pull_number is missing in pr-context.json" >&2
+          echo '{"error":"pull_number is missing in context"}'
+          exit 1
+        fi
+
+        HEAD_SHA="$(jq -r '.diff_refs.head_sha // empty' "$CONTEXT")"
+        if [ -z "$HEAD_SHA" ] || [ "$HEAD_SHA" = "null" ]; then
+          echo "ERROR: github_post_inline_comment: head_sha is missing in pr-context.json" >&2
+          echo '{"error":"head_sha is missing in context"}'
+          exit 1
+        fi
+
+        FILE={{ shq .params.file_path }}
+        LINE_RAW="{{ .params.line }}"
+        LINE="$(printf '%.*f\n' 0 "$LINE_RAW" 2>/dev/null || printf '%s\n' "$LINE_RAW")"
+        BODY_RAW={{ shq .params.body }}
+
+        PAYLOAD="$(jq -n \
+          --arg body "$BODY_RAW" \
+          --arg commit_id "$HEAD_SHA" \
+          --arg path "$FILE" \
+          --argjson line "$LINE" \
+          '{
+            body: $body,
+            commit_id: $commit_id,
+            path: $path,
+            line: $line,
+            side: "RIGHT"
+          }'
+        )"
+
+        API_URL="${GITHUB_API_URL_EFFECTIVE}/repos/${REPO}/pulls/${PR_NUMBER}/comments"
+
+        RESPONSE="$(mktemp)"
+        STATUS="$(curl -sS -o "$RESPONSE" -w '%{http_code}' \
+          --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+          --header "Accept: application/vnd.github+json" \
+          --header "Content-Type: application/json" \
+          --data "$PAYLOAD" \
+          "$API_URL" || true)"
+
+        if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 300 ]; then
+          echo "INFO: github_post_inline_comment: created review comment (status=$STATUS)" >&2
+          echo "$(jq -c '{status: "ok", http_status: '"$STATUS"', url: (.html_url // "")}' "$RESPONSE" 2>/dev/null || echo "{\"status\":\"ok\",\"http_status\":$STATUS}")"
+        else
+          echo "ERROR: github_post_inline_comment: GitHub API returned status $STATUS, response: $(head -c 500 "$RESPONSE" | tr '\n' ' ')" >&2
+          echo "$(jq -c '{status: "error", http_status: '"$STATUS"', body: .}' "$RESPONSE" 2>/dev/null || echo "{\"status\":\"error\",\"http_status\":$STATUS}")"
+          rm -f "$RESPONSE"
+          exit 1
+        fi
+
+        rm -f "$RESPONSE"
+
+  # Создаёт общий summary‑комментарий к PR через GitHub API.
+  - name: github_post_summary_comment
+    description: "Post a summary review comment as a pull request issue comment."
+    prompt: |
+      Tool: github_post_summary_comment
+      Use this tool once per review, to post the final Markdown summary as a PR comment.
+      Always pass the full Markdown body of the summary review.
+      The tool returns a JSON object with a basic status.
+    parameters:
+      type: object
+      properties:
+        body:
+          type: string
+      required: [body]
+    implementation:
+      type: shell
+      shell_template: |
+        set -euo pipefail
+
+        CONTEXT="{{ .agent.artifact_dir }}/plan/pr-context.json"
+
+        if [ ! -f "$CONTEXT" ]; then
+          echo "ERROR: github_post_summary_comment: pr-context.json not found at path: $CONTEXT" >&2
+          echo '{"error":"pr-context.json not found"}'
+          exit 1
+        fi
+        if [ -z "${GITHUB_TOKEN:-}" ]; then
+          echo "ERROR: github_post_summary_comment: GITHUB_TOKEN is not set" >&2
+          echo '{"error":"GITHUB_TOKEN is not set"}'
+          exit 1
+        fi
+
+        GITHUB_API_URL_EFFECTIVE="${GITHUB_API_URL:-https://api.github.com}"
+
+        REPO="${GITHUB_REPOSITORY:-}"
+        if [ -z "$REPO" ]; then
+          REPO="$(jq -r '.repository // empty' "$CONTEXT")"
+        fi
+        if [ -z "$REPO" ] || [ "$REPO" = "null" ]; then
+          echo "ERROR: github_post_summary_comment: repository is not set (GITHUB_REPOSITORY or pr-context.json.repository)" >&2
+          echo '{"error":"repository is not set"}'
+          exit 1
+        fi
+
+        PR_NUMBER="$(jq -r '.pull_number // empty' "$CONTEXT")"
+        if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "null" ]; then
+          echo "ERROR: github_post_summary_comment: pull_number is missing in pr-context.json" >&2
+          echo '{"error":"pull_number is missing in context"}'
+          exit 1
+        fi
+
+        BODY_RAW={{ shq .params.body }}
+        BODY_JSON="$(jq -n --arg body "$BODY_RAW" '{body: $body}')"
+
+        API_URL="${GITHUB_API_URL_EFFECTIVE}/repos/${REPO}/issues/${PR_NUMBER}/comments"
+
+        RESPONSE="$(mktemp)"
+        STATUS="$(curl -sS -o "$RESPONSE" -w '%{http_code}' \
+          --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+          --header "Accept: application/vnd.github+json" \
+          --header "Content-Type: application/json" \
+          --data "$BODY_JSON" \
+          "$API_URL" || true)"
+
+        if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 300 ]; then
+          echo "INFO: github_post_summary_comment: created PR comment (status=$STATUS)" >&2
+          echo "$(jq -c '{status: "ok", http_status: '"$STATUS"', url: (.html_url // "")}' "$RESPONSE" 2>/dev/null || echo "{\"status\":\"ok\",\"http_status\":$STATUS}")"
+        else
+          echo "ERROR: github_post_summary_comment: GitHub API returned status $STATUS, response: $(head -c 500 "$RESPONSE" | tr '\n' ' ')" >&2
+          echo "$(jq -c '{status: "error", http_status: '"$STATUS"', body: .}' "$RESPONSE" 2>/dev/null || echo "{\"status\":\"error\",\"http_status\":$STATUS}")"
+          rm -f "$RESPONSE"
+          exit 1
+        fi
+
+        rm -f "$RESPONSE"
+
+  # Возвращает метаданные PR из локального pr-context.json.
+  - name: github_get_pr_metadata
+    description: "Get basic PR metadata (title, body, url, author, branches, stats) from local PR context JSON."
+    prompt: |
+      Tool: github_get_pr_metadata
+      Use this tool to get pull request metadata (title, description, URL, author, branches, basic stats).
+      It reads from the local PR context JSON file created earlier in the scenario.
+      The tool returns a JSON object with relevant fields or an error object if the file is missing.
+    parameters:
+      type: object
+      properties: {}
+      required: []
+    implementation:
+      type: shell
+      shell_template: |
+        set -euo pipefail
+
+        CONTEXT="{{ .agent.artifact_dir }}/plan/pr-context.json"
+        echo "DEBUG: github_get_pr_metadata: CONTEXT=$CONTEXT" >&2
+        if [ ! -f "$CONTEXT" ]; then
+          echo "ERROR: github_get_pr_metadata: pr-context.json not found at path: $CONTEXT" >&2
+          echo '{"error":"pr-context.json not found"}'
+          exit 1
+        fi
+
+        jq -c '{
+          repository,
+          pull_number,
+          title,
+          description,
+          web_url,
+          source_branch,
+          target_branch,
+          author,
+          stats
+        }' "$CONTEXT"
+
+  # Возвращает список комментариев с тегом #ai, на которые ещё нет ответа агента (#ai-response-id-NNN).
+  - name: github_get_pending_ai_comments
+    description: "Get PR comments (issue + review) that contain #ai tag and have no agent response tagged with #ai-response-id-<comment_id>."
+    prompt: |
+      Tool: github_get_pending_ai_comments
+      Use this tool to find PR comments that contain the '#ai' tag and currently have no agent response tagged as '#ai-response-id-<comment_id>'.
+      It uses data from local pr-context.json created earlier in the scenario.
+      The tool returns a JSON array of pending comments with fields:
+        - id: numeric comment id;
+        - body: full text of the original comment;
+        - author: author username;
+        - created_at: creation timestamp;
+        - type: "IssueComment" or "ReviewComment";
+        - file_path/line: for review comments, the file and line in the PR diff.
+    parameters:
+      type: object
+      properties: {}
+      required: []
+    implementation:
+      type: shell
+      shell_template: |
+        set -euo pipefail
+
+        CONTEXT="{{ .agent.artifact_dir }}/plan/pr-context.json"
+        echo "DEBUG: github_get_pending_ai_comments: CONTEXT=$CONTEXT" >&2
+        if [ ! -f "$CONTEXT" ]; then
+          echo '{"error":"pr-context.json not found"}'
+          exit 1
+        fi
+
+        jq -c '
+          def responded_ids:
+            [ .comments[]
+              | select(.body | test("#ai-response-id-[0-9]+"))
+              | (.body | capture("#ai-response-id-(?<id>[0-9]+)") | .id | tonumber)
+            ];
+
+          (responded_ids) as $resp
+          | [ .comments[]
+              | select(.body | test("(^|[[:space:]])#ai($|[[:space:]]|[^[:alnum:]_-])"))
+              | select(.id as $id | ($resp | index($id) | not))
+              | {
+                  id,
+                  body,
+                  author,
+                  created_at,
+                  type: (.type // ""),
+                  file_path: (.file_path // ""),
+                  line: (.line // null),
+                  in_reply_to_id: (.in_reply_to_id // null),
+                  web_url: (.web_url // "")
+                }
+            ]
+        ' "$CONTEXT"
+
+  # Создаёт ответ на комментарий с тегом #ai и проставляет тег #ai-response-id-<comment_id>.
+  - name: github_post_ai_reply
+    description: "Post an answer to a PR comment (issue or review) and tag it with #ai-response-id-<comment_id>."
+    prompt: |
+      Tool: github_post_ai_reply
+      Use this tool to reply to a PR comment that contains the '#ai' tag.
+      Always pass:
+        - note_id: the numeric id of the original comment (as returned by github_get_pending_ai_comments).
+        - body: the Markdown-formatted answer.
+      The tool will append '#ai-response-id-<note_id>' on a new line at the end of the body.
+      For review comments it will try to reply in-thread; otherwise it posts a regular PR comment.
+    parameters:
+      type: object
+      properties:
+        note_id:
+          type: integer
+        body:
+          type: string
+      required: [note_id, body]
+    implementation:
+      type: shell
+      shell_template: |
+        set -euo pipefail
+
+        CONTEXT="{{ .agent.artifact_dir }}/plan/pr-context.json"
+
+        if [ ! -f "$CONTEXT" ]; then
+          echo "ERROR: github_post_ai_reply: pr-context.json not found at path: $CONTEXT" >&2
+          echo '{"error":"pr-context.json not found"}'
+          exit 1
+        fi
+        if [ -z "${GITHUB_TOKEN:-}" ]; then
+          echo "ERROR: github_post_ai_reply: GITHUB_TOKEN is not set" >&2
+          echo '{"error":"GITHUB_TOKEN is not set"}'
+          exit 1
+        fi
+
+        GITHUB_API_URL_EFFECTIVE="${GITHUB_API_URL:-https://api.github.com}"
+
+        REPO="${GITHUB_REPOSITORY:-}"
+        if [ -z "$REPO" ]; then
+          REPO="$(jq -r '.repository // empty' "$CONTEXT")"
+        fi
+        if [ -z "$REPO" ] || [ "$REPO" = "null" ]; then
+          echo "ERROR: github_post_ai_reply: repository is not set (GITHUB_REPOSITORY or pr-context.json.repository)" >&2
+          echo '{"error":"repository is not set"}'
+          exit 1
+        fi
+
+        PR_NUMBER="$(jq -r '.pull_number // empty' "$CONTEXT")"
+        if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "null" ]; then
+          echo "ERROR: github_post_ai_reply: pull_number is missing in pr-context.json" >&2
+          echo '{"error":"pull_number is missing in context"}'
+          exit 1
+        fi
+
+        NOTE_ID_RAW="{{ .params.note_id }}"
+        BODY_RAW={{ shq .params.body }}
+
+        NOTE_ID="$(printf '%.*f\n' 0 "$NOTE_ID_RAW" 2>/dev/null || printf '%s\n' "$NOTE_ID_RAW")"
+        TAG_SUFFIX="#ai-response-id-${NOTE_ID}"
+        TAGGED_BODY="${BODY_RAW}"$'\n\n'"${TAG_SUFFIX}"
+
+        COMMENT_TYPE="$(jq -r --arg id "$NOTE_ID" '.comments[] | select((.id|tostring) == $id) | (.type // "")' "$CONTEXT" | head -n1 || true)"
+        COMMENT_URL="$(jq -r --arg id "$NOTE_ID" '.comments[] | select((.id|tostring) == $id) | (.web_url // "")' "$CONTEXT" | head -n1 || true)"
+
+        if [ -z "$COMMENT_TYPE" ] || [ "$COMMENT_TYPE" = "null" ]; then
+          echo "ERROR: github_post_ai_reply: comment id not found in pr-context.json: ${NOTE_ID}" >&2
+          echo '{"error":"comment id not found in context"}'
+          exit 1
+        fi
+
+        API_URL=""
+        PAYLOAD=""
+
+        if [ "$COMMENT_TYPE" = "ReviewComment" ]; then
+          PAYLOAD="$(jq -n --arg body "$TAGGED_BODY" --argjson in_reply_to "$NOTE_ID" '{body: $body, in_reply_to: $in_reply_to}')"
+          API_URL="${GITHUB_API_URL_EFFECTIVE}/repos/${REPO}/pulls/${PR_NUMBER}/comments"
+        else
+          BODY_FINAL="$TAGGED_BODY"
+          if [ -n "$COMMENT_URL" ] && [ "$COMMENT_URL" != "null" ]; then
+            BODY_FINAL="(replying to ${COMMENT_URL})"$'\n\n'"${TAGGED_BODY}"
+          fi
+          PAYLOAD="$(jq -n --arg body "$BODY_FINAL" '{body: $body}')"
+          API_URL="${GITHUB_API_URL_EFFECTIVE}/repos/${REPO}/issues/${PR_NUMBER}/comments"
+        fi
+
+        RESPONSE="$(mktemp)"
+        STATUS="$(curl -sS -o "$RESPONSE" -w '%{http_code}' \
+          --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+          --header "Accept: application/vnd.github+json" \
+          --header "Content-Type: application/json" \
+          --data "$PAYLOAD" \
+          "$API_URL" || true)"
+
+        if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 300 ]; then
+          echo "INFO: github_post_ai_reply: created AI reply for note_id=$NOTE_ID (status=$STATUS)" >&2
+          echo "$(jq -c '{status: "ok", http_status: '"$STATUS"', url: (.html_url // "")}' "$RESPONSE" 2>/dev/null || echo "{\"status\":\"ok\",\"http_status\":$STATUS}")"
+        else
+          echo "ERROR: github_post_ai_reply: GitHub API returned status $STATUS, response: $(head -c 500 "$RESPONSE" | tr '\n' ' ')" >&2
+          echo "$(jq -c '{status: "error", http_status: '"$STATUS"', body: .}' "$RESPONSE" 2>/dev/null || echo "{\"status\":\"error\",\"http_status\":$STATUS}")"
+          rm -f "$RESPONSE"
+          exit 1
+        fi
+
+        rm -f "$RESPONSE"
+
+steps:
+  # 1. Сбор нормализованного контекста PR и манифеста файлов для пофайлового ревью.
+  - id: build_pr_context
+    type: shell
+    name: "Сбор PR‑контекста и манифеста файлов"
+    shell:
+      dir: "."
+      run: |
+        set -euo pipefail
+
+        if [ -z "${GITHUB_REPOSITORY:-}" ]; then
+          echo "GITHUB_REPOSITORY must be set (owner/repo)" >&2
+          exit 1
+        fi
+        if [ -z "${GITHUB_TOKEN:-}" ]; then
+          echo "GITHUB_TOKEN is not set, cannot access GitHub API" >&2
+          exit 1
+        fi
+
+        GITHUB_API_URL_EFFECTIVE="${GITHUB_API_URL:-https://api.github.com}"
+
+        PR_NUMBER=""
+        if [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "${GITHUB_EVENT_PATH}" ]; then
+          PR_NUMBER="$(jq -r '.pull_request.number // .number // empty' "${GITHUB_EVENT_PATH}" 2>/dev/null || true)"
+        fi
+        if [ -z "$PR_NUMBER" ]; then
+          PR_NUMBER="${PAI_GITHUB_PULL_NUMBER:-}"
+        fi
+        if [ -z "$PR_NUMBER" ]; then
+          echo "Pull request number is not set. Use pull_request event or set PAI_GITHUB_PULL_NUMBER." >&2
+          exit 1
+        fi
+
+        ARTIFACT_DIR="{{ .agent.artifact_dir }}"
+        PLAN_DIR="${ARTIFACT_DIR}/plan"
+        mkdir -p "$PLAN_DIR"
+
+        PR_RAW_PATH="${PLAN_DIR}/pr_raw.json"
+        PR_FILES_RAW_PATH="${PLAN_DIR}/pr_files_raw.json"
+        PR_ISSUE_COMMENTS_RAW_PATH="${PLAN_DIR}/pr_issue_comments_raw.json"
+        PR_REVIEW_COMMENTS_RAW_PATH="${PLAN_DIR}/pr_review_comments_raw.json"
+        PR_CONTEXT_PATH="${PLAN_DIR}/pr-context.json"
+        FILE_MANIFEST_PATH="${PLAN_DIR}/file-manifest.yaml"
+
+        api_get() {
+          local url="$1"
+          local out="$2"
+          local what="$3"
+
+          local tmp
+          tmp="$(mktemp)"
+          local status
+          status="$(curl -sS -L -o "$tmp" -w '%{http_code}' \
+            --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            "$url" || true)"
+
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            echo "Failed to fetch ${what} from GitHub API: HTTP status ${status}" >&2
+            echo "URL: ${url}" >&2
+            echo "Response body (truncated):" >&2
+            head -c 500 "$tmp" | tr '\n' ' ' >&2
+            echo >&2
+            rm -f "$tmp"
+            exit 1
+          fi
+
+          mv "$tmp" "$out"
+        }
+
+        echo "Fetching pull request details for AI-review context..." >&2
+        api_get "${GITHUB_API_URL_EFFECTIVE}/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" "$PR_RAW_PATH" "pull request"
+
+        echo "Fetching pull request changed files for AI-review context..." >&2
+        tmp_files="$(mktemp)"
+        : > "$tmp_files"
+
+        page=1
+        while [ "$page" -le 10 ]; do
+          page_tmp="$(mktemp)"
+          url="${GITHUB_API_URL_EFFECTIVE}/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100&page=${page}"
+          status="$(curl -sS -L -o "$page_tmp" -w '%{http_code}' \
+            --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            "$url" || true)"
+
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            echo "Failed to fetch pull request files (page ${page}) from GitHub API: HTTP status ${status}" >&2
+            echo "URL: ${url}" >&2
+            echo "Response body (truncated):" >&2
+            head -c 500 "$page_tmp" | tr '\n' ' ' >&2
+            echo >&2
+            rm -f "$page_tmp" "$tmp_files"
+            exit 1
+          fi
+
+          if jq -e 'length == 0' "$page_tmp" >/dev/null 2>&1; then
+            rm -f "$page_tmp"
+            break
+          fi
+
+          if [ ! -s "$tmp_files" ]; then
+            mv "$page_tmp" "$tmp_files"
+          else
+            jq -s '.[0] + .[1]' "$tmp_files" "$page_tmp" > "${tmp_files}.new"
+            mv "${tmp_files}.new" "$tmp_files"
+            rm -f "$page_tmp"
+          fi
+
+          page=$((page + 1))
+        done
+
+        mv "$tmp_files" "$PR_FILES_RAW_PATH"
+
+        echo "Fetching pull request issue comments for AI-review context..." >&2
+        tmp_ic="$(mktemp)"
+        : > "$tmp_ic"
+        page=1
+        while [ "$page" -le 10 ]; do
+          page_tmp="$(mktemp)"
+          url="${GITHUB_API_URL_EFFECTIVE}/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100&page=${page}"
+          status="$(curl -sS -L -o "$page_tmp" -w '%{http_code}' \
+            --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            "$url" || true)"
+
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            echo "Failed to fetch issue comments (page ${page}) from GitHub API: HTTP status ${status}" >&2
+            echo "URL: ${url}" >&2
+            echo "Response body (truncated):" >&2
+            head -c 500 "$page_tmp" | tr '\n' ' ' >&2
+            echo >&2
+            rm -f "$page_tmp" "$tmp_ic"
+            exit 1
+          fi
+
+          if jq -e 'length == 0' "$page_tmp" >/dev/null 2>&1; then
+            rm -f "$page_tmp"
+            break
+          fi
+
+          if [ ! -s "$tmp_ic" ]; then
+            mv "$page_tmp" "$tmp_ic"
+          else
+            jq -s '.[0] + .[1]' "$tmp_ic" "$page_tmp" > "${tmp_ic}.new"
+            mv "${tmp_ic}.new" "$tmp_ic"
+            rm -f "$page_tmp"
+          fi
+
+          page=$((page + 1))
+        done
+
+        mv "$tmp_ic" "$PR_ISSUE_COMMENTS_RAW_PATH"
+
+        echo "Fetching pull request review comments for AI-review context..." >&2
+        tmp_rc="$(mktemp)"
+        : > "$tmp_rc"
+        page=1
+        while [ "$page" -le 10 ]; do
+          page_tmp="$(mktemp)"
+          url="${GITHUB_API_URL_EFFECTIVE}/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/comments?per_page=100&page=${page}"
+          status="$(curl -sS -L -o "$page_tmp" -w '%{http_code}' \
+            --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            "$url" || true)"
+
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            echo "Failed to fetch review comments (page ${page}) from GitHub API: HTTP status ${status}" >&2
+            echo "URL: ${url}" >&2
+            echo "Response body (truncated):" >&2
+            head -c 500 "$page_tmp" | tr '\n' ' ' >&2
+            echo >&2
+            rm -f "$page_tmp" "$tmp_rc"
+            exit 1
+          fi
+
+          if jq -e 'length == 0' "$page_tmp" >/dev/null 2>&1; then
+            rm -f "$page_tmp"
+            break
+          fi
+
+          if [ ! -s "$tmp_rc" ]; then
+            mv "$page_tmp" "$tmp_rc"
+          else
+            jq -s '.[0] + .[1]' "$tmp_rc" "$page_tmp" > "${tmp_rc}.new"
+            mv "${tmp_rc}.new" "$tmp_rc"
+            rm -f "$page_tmp"
+          fi
+
+          page=$((page + 1))
+        done
+
+        mv "$tmp_rc" "$PR_REVIEW_COMMENTS_RAW_PATH"
+
+        echo "Building normalized PR context JSON for AI-review..." >&2
+
+        DIFF_MAX_CHARS="${PR_DIFF_MAX_CHARS:-16000}"
+
+        jq -n \
+          --slurpfile pr "$PR_RAW_PATH" \
+          --slurpfile pr_files "$PR_FILES_RAW_PATH" \
+          --slurpfile issue_comments "$PR_ISSUE_COMMENTS_RAW_PATH" \
+          --slurpfile review_comments "$PR_REVIEW_COMMENTS_RAW_PATH" \
+          --arg diff_max_chars "$DIFF_MAX_CHARS" \
+          '
+          def truncate_diff(s):
+            if (s | type) != "string" then
+              ""
+            elif (s | length) > ($diff_max_chars | tonumber) then
+              (s | .[0:($diff_max_chars | tonumber)])
+            else
+              s
+            end;
+
+          ( $pr[0] // {} ) as $p
+          | ( $pr_files[0] // [] ) as $files
+          | ( $issue_comments[0] // [] ) as $ic
+          | ( $review_comments[0] // [] ) as $rc
+          | {
+              repository: ($p.base.repo.full_name // ""),
+              pull_number: ($p.number // null),
+              title: ($p.title // ""),
+              description: ($p.body // ""),
+              web_url: ($p.html_url // ""),
+              source_branch: ($p.head.ref // ""),
+              target_branch: ($p.base.ref // ""),
+              author: {
+                id: ($p.user.id // null),
+                login: ($p.user.login // "")
+              },
+              diff_refs: {
+                base_sha: ($p.base.sha // ""),
+                head_sha: ($p.head.sha // "")
+              },
+              changes: (
+                ($files // [])
+                | if type == "array" then
+                    map(
+                      if type == "object" then
+                        {
+                          file_path: (.filename // ""),
+                          status: (.status // ""),
+                          additions: (.additions // 0),
+                          deletions: (.deletions // 0),
+                          changes: (.changes // 0),
+                          diff: (truncate_diff(.patch // ""))
+                        }
+                      else empty
+                      end
+                    )
+                  else
+                    []
+                  end
+              ),
+              comments: (
+                (
+                  ($ic // [])
+                  | map(
+                      if type == "object" then
+                        {
+                          id: (.id // null),
+                          type: "IssueComment",
+                          author: (.user.login // ""),
+                          body: (.body // ""),
+                          created_at: (.created_at // ""),
+                          web_url: (.html_url // ""),
+                          file_path: "",
+                          line: null,
+                          in_reply_to_id: null
+                        }
+                      else empty
+                      end
+                    )
+                )
+                +
+                (
+                  ($rc // [])
+                  | map(
+                      if type == "object" then
+                        {
+                          id: (.id // null),
+                          type: "ReviewComment",
+                          author: (.user.login // ""),
+                          body: (.body // ""),
+                          created_at: (.created_at // ""),
+                          web_url: (.html_url // ""),
+                          file_path: (.path // ""),
+                          line: (.line // null),
+                          in_reply_to_id: (.in_reply_to_id // null)
+                        }
+                      else empty
+                      end
+                    )
+                )
+              ),
+              stats: {
+                changed_files_count: (
+                  ($files // [])
+                  | if type == "array" then length else 0 end
+                ),
+                additions: ($p.additions // 0),
+                deletions: ($p.deletions // 0)
+              }
+            }
+          ' > "$PR_CONTEXT_PATH"
+
+        echo "PR context for AI-review has been written to ${PR_CONTEXT_PATH}" >&2
+
+        echo "Building file manifest for per-file review..." >&2
+
+        IGNORE_RAW="${PAI_REVIEW_IGNORE:-}"
+        IFS=',' read -r -a IGNORE_PATTERNS <<< "$IGNORE_RAW"
+
+        tmp_files2="$(mktemp)"
+        jq -r '.changes[]?.file_path // empty' "$PR_CONTEXT_PATH" | sort -u > "$tmp_files2"
+
+        {
+          echo "items:"
+          while IFS= read -r path; do
+            skip=false
+            for pat in "${IGNORE_PATTERNS[@]}"; do
+              pat_trimmed="${pat//[[:space:]]/}"
+              if [ -z "$pat_trimmed" ]; then
+                continue
+              fi
+              case "$path" in
+                $pat_trimmed)
+                  skip=true
+                  break
+                  ;;
+              esac
+            done
+
+            if [ "$skip" = true ]; then
+              continue
+            fi
+
+            id="${path//\//__}"
+            echo "  - id: \"${id}\""
+            echo "    file_path: \"${path}\""
+          done < "$tmp_files2"
+        } > "$FILE_MANIFEST_PATH"
+
+        rm -f "$tmp_files2"
+
+        echo "File manifest for AI-review has been written to ${FILE_MANIFEST_PATH}" >&2
+    outputs:
+      - id: pr_context
+        type: file
+        from: path
+        path: "{{ .agent.artifact_dir }}/plan/pr-context.json"
+      - id: file_manifest
+        type: file
+        from: path
+        path: "{{ .agent.artifact_dir }}/plan/file-manifest.yaml"
+
+  # 2. Параллельное пофайловое ревью (каждый элемент матрицы — отдельный файл).
+  - id: review_per_file
+    type: matrix
+    name: "Пофайловое AI‑ревью изменённых файлов"
+    needs: [build_pr_context]
+    matrix:
+      from_yaml: "{{ .outputs.build_pr_context.file_manifest.path }}"
+      select: items
+      item_id: "{{ .item.id }}"
+      inject:
+        file_path: "{{ .item.file_path }}"
+    run:
+      step: review_file
+
+  # Шаблонный шаг ревью для одного файла.
+  - id: review_file
+    type: llm
+    template: true
+    name: "AI‑ревью файла {{ .matrix.file_path }}"
+    allow_failure: true
+    retries: 3
+    max_tokens: 100000
+    tools_allowed:
+      - shell
+      - github_get_file_diff
+      - github_post_inline_comment
+    inputs:
+      - id: pr_context
+        type: file
+        path: "{{ .outputs.build_pr_context.pr_context.path }}"
+    # По умолчанию промпты берём из репозитория рядом с конфигом (../prompts).
+    # Для переопределения используйте абсолютный путь через переменную окружения.
+    user_prompt_path: '{{ default "../prompts" (env "PAI_AI_REVIEW_PROMPTS_DIR") }}/file-review.md'
+    outputs:
+      - id: file_review_log
+        type: file
+        from: llm_text
+        path: "{{ .agent.artifact_dir }}/ai-review/files/{{ .matrix.item_id }}.md"
+
+  # 3. Финальное summary‑ревью по всему PR и постинг summary‑комментария.
+  - id: review_summary
+    type: llm
+    name: "AI‑summary по всему PR"
+    needs: [build_pr_context, review_per_file]
+    tools_allowed:
+      - shell
+      - github_get_pr_metadata
+      - github_post_summary_comment
+    max_tokens: 100000
+    inputs:
+      - id: pr_context
+        type: file
+        path: "{{ .outputs.build_pr_context.pr_context.path }}"
+    user_prompt_path: '{{ default "../prompts" (env "PAI_AI_REVIEW_PROMPTS_DIR") }}/review-summary.md'
+    outputs:
+      - id: pr_review_comment
+        type: file
+        from: llm_text
+        path: "{{ .agent.artifact_dir }}/ai-review/comment.md"
+
+  # 4. Ответы на комментарии с тегом #ai, на которые ещё нет ответа агента.
+  - id: review_responses
+    type: llm
+    name: "Ответы на PR‑комментарии с тегом #ai"
+    needs: [build_pr_context]
+    tools_allowed:
+      - shell
+      - github_get_pending_ai_comments
+      - github_post_ai_reply
+    max_tokens: 25000
+    inputs:
+      - id: pr_context
+        type: file
+        path: "{{ .outputs.build_pr_context.pr_context.path }}"
+    user_prompt_path: '{{ default "../prompts" (env "PAI_AI_REVIEW_PROMPTS_DIR") }}/review-responses.md'
+    outputs:
+      - id: responses_log
+        type: file
+        from: llm_text
+        path: "{{ .agent.artifact_dir }}/ai-review/responses.md"

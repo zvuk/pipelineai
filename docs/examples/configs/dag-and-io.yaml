@@ -1,0 +1,155 @@
+## Пример: DAG и I/O.
+## Демонстрирует: зависимости между шагами, inputs/outputs (file/log) и параллельные шаги.
+version: 1
+agent:
+  name: "pipelineai dag-io demo"
+  artifact_dir: ".agent/artifacts"
+  reasoning: true
+
+defaults:
+  scenario_timeout: 5m
+  step_timeout: 1m
+  tool_timeout: 30s
+
+steps:
+  - id: a_init
+    type: shell
+    name: "init data"
+    shell:
+      run: |
+        set -euo pipefail
+        printf 'one-two'
+      dir: "."
+      timeout: 10s
+    outputs:
+      - id: data
+        type: file
+        from: command_stdout
+        path: "{{ .agent.artifact_dir }}/dag-io/data.txt"
+
+  - id: b_transform
+    type: shell
+    name: "upper-case"
+    needs: [ a_init ]
+    shell:
+      run: |
+        set -euo pipefail
+        tr '[:lower:]' '[:upper:]' < {{ .outputs.a_init.data.path }}
+      dir: "."
+      timeout: 10s
+    outputs:
+      - id: data_upper
+        type: file
+        from: command_stdout
+        path: "{{ .agent.artifact_dir }}/dag-io/data_upper.txt"
+
+  - id: c_append
+    type: shell
+    name: "append suffix"
+    needs: [ b_transform ]
+    inputs:
+      - id: suffix
+        type: inline
+        template: "-SUFFIX"
+    shell:
+      run: |
+        set -euo pipefail
+        printf '%s%s' "$(cat {{ .outputs.b_transform.data_upper.path }})" "{{ .inputs.suffix.inline }}"
+      dir: "."
+      timeout: 10s
+    outputs:
+      - id: final
+        type: file
+        from: command_stdout
+        path: "{{ .agent.artifact_dir }}/dag-io/final.txt"
+
+  - id: d_verify
+    type: shell
+    name: "verify"
+    needs: [ c_append ]
+    shell:
+      run: |
+        set -euo pipefail
+        test -f {{ .agent.artifact_dir }}/dag-io/data.txt
+        test -f {{ .agent.artifact_dir }}/dag-io/data_upper.txt
+        test -f {{ .agent.artifact_dir }}/dag-io/final.txt
+        grep -qx "ONE-TWO-SUFFIX" {{ .agent.artifact_dir }}/dag-io/final.txt
+      dir: "."
+      timeout: 10s
+
+  - id: e_llm
+    type: llm
+    name: "report"
+    needs: [ d_verify, p_shell_stdout, p_shell_stderr, p_llm_text, p_llm_json ]
+    temperature: 0.0
+    system_prompt: |
+      Ты — лаконичный ассистент CI. Верни ровно одну строку: DAG PASSED.
+      Никаких дополнительных комментариев и форматирования не добавляй.
+    user_prompt: |
+      Напиши отчёт о том, что DAG и I/O прошли успешно.
+    outputs:
+      - id: report
+        type: file
+        from: llm_text
+        path: "{{ .agent.artifact_dir }}/dag-io/report.txt"
+
+  # Параллельные независимые проверки вывода и логики LLM
+  - id: p_shell_stdout
+    type: shell
+    name: "parallel stdout to file and log"
+    shell:
+      run: |
+        set -euo pipefail
+        echo "p-stdout"
+      dir: "."
+      timeout: 10s
+    outputs:
+      - id: out_file
+        type: file
+        from: command_stdout
+        path: "{{ .agent.artifact_dir }}/dag-io/p_shell_stdout.txt"
+      - id: out_log
+        type: log
+        from: command_stdout
+
+  - id: p_shell_stderr
+    type: shell
+    name: "parallel stderr to file and log"
+    shell:
+      run: |
+        set -euo pipefail
+        echo "p-stderr" 1>&2
+      dir: "."
+      timeout: 10s
+    outputs:
+      - id: err_file
+        type: file
+        from: command_stderr
+        path: "{{ .agent.artifact_dir }}/dag-io/p_shell_stderr.txt"
+      - id: err_log
+        type: log
+        from: command_stderr
+
+  - id: p_llm_text
+    type: llm
+    name: "parallel llm text"
+    temperature: 0.0
+    system_prompt: "Верни ровно слово: TEXT"
+    user_prompt: "ok"
+    outputs:
+      - id: text
+        type: file
+        from: llm_text
+        path: "{{ .agent.artifact_dir }}/dag-io/p_llm_text.txt"
+
+  - id: p_llm_json
+    type: llm
+    name: "parallel llm json"
+    temperature: 0.0
+    system_prompt: "Ответь коротко: JSON"
+    user_prompt: "ok"
+    outputs:
+      - id: raw
+        type: file
+        from: llm_json
+        path: "{{ .agent.artifact_dir }}/dag-io/p_llm_json.json"

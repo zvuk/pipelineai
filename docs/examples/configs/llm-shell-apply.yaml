@@ -1,0 +1,79 @@
+## Пример: цепочка LLM -> shell -> apply_patch.
+## Демонстрирует: генерацию правок моделью и применение через apply_patch.
+version: 1
+agent:
+  name: "pipelineai llm-shell-apply demo"
+  artifact_dir: ".agent/artifacts"
+  reasoning: true
+
+defaults:
+  scenario_timeout: 10m
+  step_timeout: 10m
+  env:
+    GOFLAGS: "-count=1"
+  tool_timeout: 60s
+
+approvers:
+  - tool: shell
+    rules:
+      - regex: "(?i)rm\\s+-rf\\s+/"
+        message: "This command is forbidden by policy"
+  - tool: apply_patch
+    rules:
+      - glob_patterns: [ "docs/**", "**/*.md" ]
+        allow_create: true
+        allow_update: true
+        allow_delete: false
+
+steps:
+  - id: doc_generate
+    type: llm
+    name: "Сгенерировать документ"
+    description: "Формируем обновлённый README на основе анализа кода"
+    system_prompt: |
+      Ты — технический писатель. Подготовь README на основе предоставленных файлов.
+    user_prompt: |
+      Используй тестовые результаты и текущий README. Обнови раздел "Usage".
+    outputs:
+      - id: summary
+        type: file
+        from: llm_text
+        path: "{{ .agent.artifact_dir }}/doc/README.generated.md"
+
+  - id: run_sanity
+    type: shell
+    name: "Проверка go test"
+    needs: [doc_generate]
+    env:
+      PIPELINE_AI_DOC: "{{ .outputs.doc_generate.summary.path }}"
+    shell:
+      run: |
+        set -euo pipefail
+        go test ./...
+      dir: "."
+      timeout: 5m
+    outputs:
+      - id: test_log
+        type: file
+        from: command_stdout
+        path: "{{ .agent.artifact_dir }}/logs/go-test.txt"
+
+  - id: doc_apply
+    type: llm
+    name: "Обновление README"
+    needs: [run_sanity]
+    tools_allowed: ["apply_patch"]
+    inputs:
+      - id: generated_readme
+        type: file
+        path: "{{ .outputs.doc_generate.summary.path }}"
+    system_prompt: |
+      Ты — инженер, который синхронизирует документацию. Используй инструмент apply_patch для доработки README.md.
+    user_prompt: |
+      Замените содержимое README.md файлом {{ .inputs.generated_readme.path }}.
+      Убедись, что apply_patch выполняет операцию патча и возвращает diff. После применения дай краткое описание изменений.
+    outputs:
+      - id: doc_update
+        type: file
+        from: llm_text
+        path: "{{ .agent.artifact_dir }}/doc/doc_apply_summary.md"

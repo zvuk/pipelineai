@@ -1,0 +1,90 @@
+## Пример: инструменты shell и apply_patch.
+## Демонстрирует: разведку через shell и правки через apply_patch с верификацией.
+version: 1
+agent:
+  name: "tools smoke"
+  artifact_dir: ".agent/artifacts"
+  reasoning: true
+
+defaults:
+  step_timeout: 10m
+  tool_timeout: 60s
+
+steps:
+  - id: tools_smoke_init
+    type: shell
+    name: "init files"
+    shell:
+      run: |
+        set -euo pipefail
+        mkdir -p .agent/artifacts/tools-smoke
+        echo one > .agent/artifacts/tools-smoke/a.txt
+        echo two > .agent/artifacts/tools-smoke/b.txt
+      dir: "."
+      timeout: 30s
+
+  - id: tools_smoke_shell
+    type: llm
+    temperature: 0.2
+    name: "исследование файлов и фиксация состояния"
+    tools_allowed: [ "shell" ]
+    system_prompt: |
+      Ты — инженер по отладке пайплайнов. Тебе доступен инструмент shell для обзора файловой системы и чтения файлов (ls, cd, grep, cat и т.д.).
+      Перед любыми правками сначала изучи содержимое и зафиксируй артефакты для последующей проверки.
+    user_prompt: |
+      В каталоге .agent/artifacts/tools-smoke находится небольшой набор текстовых файлов. В одном из них (
+      b.txt) есть ошибка: слово "two" должно быть в верхнем регистре ("TWO").
+
+      Сначала выполни разведку и ничего не меняй:
+      - Посмотри содержимое каталога и сохрани список файлов в .agent/artifacts/tools-smoke/list.txt
+      - Открой файл b.txt и сохрани его текущее содержимое в .agent/artifacts/tools-smoke/b.txt.bak
+
+      Используй для этого только инструмент shell.
+
+  - id: tools_smoke_apply
+    type: llm
+    temperature: 0.2
+    name: "внесение правок через apply_patch"
+    tools_allowed: [ "apply_patch" ]
+    system_prompt: |
+      Ты — инженер по правке файлов. Все изменения необходимо вносить через инструмент apply_patch по его формату.
+      Убедись, что патч применим к текущему содержимому и не содержит лишнего контекста.
+    user_prompt: |
+      На предыдущем шаге ты сохранил снимок исходного состояния файла b.txt в
+      .agent/artifacts/tools-smoke/b.txt.bak. Теперь внеси правки, строго используя инструмент apply_patch:
+      - Выполни один вызов tool_call apply_patch. Патч не нужно печатать текстом в ответе.
+      - Обнови .agent/artifacts/tools-smoke/b.txt, заменив строку "two" на "TWO" (без дополнительных контекстных строк в хунке)
+      - Добавь файл .agent/artifacts/tools-smoke/new.txt с содержимым "created"
+
+      Все изменения оформи одним валидным патчем между *** Begin Patch и *** End Patch.
+
+  - id: tools_smoke_verify
+    type: shell
+    name: "verify"
+    shell:
+      run: |
+        set -euo pipefail
+        # 1) Убедимся, что в артефактах LLM есть вызовы инструментов
+        LLM_DIR=""
+        for d in .agent/artifacts/llm .agent/test-artifacts/llm; do
+          if [ -d "$d" ]; then LLM_DIR="$d"; break; fi
+        done
+        if [ -z "$LLM_DIR" ]; then
+          LLM_DIR=$(find .agent -type d -name llm | head -n1 || true)
+        fi
+        test -n "$LLM_DIR" && test -d "$LLM_DIR" || (echo "no llm artifacts dir found" >&2; exit 1)
+        grep -R -nE '\\"tool\\"\s*:\s*\\"(shell|apply_patch)\\"|\\"name\\"\s*:\s*\\"(shell|apply_patch)\\"' "$LLM_DIR"
+
+        # 2) Проверяем, что на шаге разведки были сохранены артефакты
+        test -f .agent/artifacts/tools-smoke/list.txt
+        grep -q "a.txt" .agent/artifacts/tools-smoke/list.txt
+        grep -q "b.txt" .agent/artifacts/tools-smoke/list.txt
+        test -f .agent/artifacts/tools-smoke/b.txt.bak
+        grep -qx "two" .agent/artifacts/tools-smoke/b.txt.bak
+
+        # 3) Проверяем, что правки внесены
+        test -f .agent/artifacts/tools-smoke/new.txt
+        grep -qx "created" .agent/artifacts/tools-smoke/new.txt
+        grep -qx "TWO" .agent/artifacts/tools-smoke/b.txt
+      dir: "."
+      timeout: 30s

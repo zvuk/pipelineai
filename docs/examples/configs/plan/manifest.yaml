@@ -1,0 +1,14 @@
+items:
+  - id: one
+    method: GET
+    url: "/api/one"
+    description: "First endpoint"
+  - id: two
+    method: POST
+    url: "/api/two"
+    description: "Second endpoint"
+  - id: three
+    method: GET
+    url: "/api/three"
+    description: "Third endpoint"
+

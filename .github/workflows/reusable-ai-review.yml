@@ -1,0 +1,102 @@
+name: PAI AI Review (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      pipelineai_ref:
+        description: "Git ref (tag/branch/SHA) for PipelineAI (used for both workflow resources and go install)."
+        required: false
+        type: string
+        default: "main"
+      runner:
+        description: "Runner label (use self-hosted if LLM_BASE_URL is localhost)."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      llm_base_url:
+        description: "OpenAI-compatible base URL, e.g. http://localhost:1234/v1 (LM Studio) or http://localhost:8000/v1 (vLLM)."
+        required: true
+        type: string
+      llm_model:
+        description: "Model id."
+        required: false
+        type: string
+        default: "openai/gpt-oss-20b"
+      review_parallel:
+        description: "Max parallelism for matrix steps."
+        required: false
+        type: number
+        default: 8
+      review_ignore:
+        description: "Comma-separated glob patterns for ignoring files in per-file review."
+        required: false
+        type: string
+        default: "**/generated/**,**/mocks/**"
+      prompts_dir:
+        description: "Absolute path to prompts dir (optional override)."
+        required: false
+        type: string
+        default: ""
+      rules_dir:
+        description: "Absolute path to rules dir (optional override)."
+        required: false
+        type: string
+        default: ""
+    secrets:
+      llm_api_key:
+        description: "LLM API key (optional for local runtimes)."
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ai_review:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Checkout PipelineAI Resources
+        uses: actions/checkout@v4
+        with:
+          repository: zvuk/pipelineai
+          ref: ${{ inputs.pipelineai_ref }}
+          path: .pai
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: .pai/go.mod
+          cache: true
+
+      - name: Install pipelineai
+        run: go install github.com/zvuk/pipelineai/cmd/pipelineai@${{ inputs.pipelineai_ref }}
+
+      - name: Run AI Review
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LLM_BASE_URL: ${{ inputs.llm_base_url }}
+          LLM_MODEL: ${{ inputs.llm_model }}
+          LLM_API_KEY: ${{ secrets.llm_api_key }}
+          PAI_REVIEW_IGNORE: ${{ inputs.review_ignore }}
+          PAI_AI_REVIEW_PROMPTS_DIR: ${{ inputs.prompts_dir != '' && inputs.prompts_dir || format('{0}/.pai/ci/prompts', github.workspace) }}
+          PAI_AI_REVIEW_RULES_DIR: ${{ inputs.rules_dir != '' && inputs.rules_dir || format('{0}/.pai/ci/rules', github.workspace) }}
+        run: |
+          set -euo pipefail
+
+          PARALLEL="${{ inputs.review_parallel }}"
+          CONFIG_PATH=".pai/ci/configs/ai-review.yml"
+
+          echo "Running PipelineAI PR review scenario..."
+          pipelineai run --config "$CONFIG_PATH" --artifact-dir .agent/artifacts --parallel "$PARALLEL" --execute-step review_per_file
+          pipelineai run --config "$CONFIG_PATH" --artifact-dir .agent/artifacts --parallel "$PARALLEL" --execute-step review_summary
+          pipelineai run --config "$CONFIG_PATH" --artifact-dir .agent/artifacts --parallel "$PARALLEL" --execute-step review_responses
+
+      - name: Upload Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pai-ai-review-artifacts
+          path: .agent/artifacts

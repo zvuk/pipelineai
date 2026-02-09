@@ -1,0 +1,94 @@
+## Пример: пользовательская функция http_request.
+## Демонстрирует: объявление функции, разрешение tools_allowed и её вызов.
+version: 1
+agent:
+  name: "functions smoke"
+  artifact_dir: ".agent/artifacts"
+  reasoning: true
+
+functions:
+  - name: http_request
+    description: "HTTP request via curl or local file read"
+    prompt: |
+      Tool: http_request
+      Use this tool to retrieve data.
+      - For web endpoints: pass method and url (http/https) and return only the response body.
+      - For local files: pass url as a local filesystem path and method GET. The tool will read the file content.
+      Make exactly one tool call per task; do not try multiple path variants.
+      Example (JSON arguments): {"method":"GET","url":".agent/artifacts/functions-smoke/payload.txt"}
+    parameters:
+      type: object
+      properties:
+        url: { type: string }
+        method:
+          type: string
+          enum: [GET, POST, PUT, PATCH, DELETE]
+        headers:
+          type: array
+          items: { type: string }
+        data: { type: string }
+      required: [url, method]
+    implementation:
+      type: shell
+      shell_template: |
+        set -euo pipefail
+        if [[ "{{ .params.url }}" =~ ^https?:// ]]; then
+          curl -sS -X "{{ .params.method }}" \
+          {{- range $h := .params.headers }} -H {{ shq $h }} \{{ end }}
+          {{- if .params.data }} --data {{ shq .params.data }} \{{ end }}
+          {{ .params.url | shq }}
+        else
+          # treat url as local filesystem path
+          cat {{ .params.url | shq }}
+        fi
+
+steps:
+  - id: functions_smoke_init
+    type: shell
+    name: "init files"
+    shell:
+      run: |
+        set -euo pipefail
+        mkdir -p .agent/artifacts/functions-smoke
+        echo -n hello > .agent/artifacts/functions-smoke/payload.txt
+      dir: "."
+      timeout: 30s
+
+  - id: functions_smoke_call
+    type: llm
+    temperature: 0.2
+    name: "вызов пользовательского инструмента http_request"
+    tools_allowed: ["http_request"]
+    system_prompt: |
+      Ты — инженер по тестированию API. Используй функцию http_request.
+    user_prompt: |
+      Прочитай содержимое файла .agent/artifacts/functions-smoke/payload.txt, обязательно используя инструмент http_request
+      (передай url как локальный путь и method=GET). Выполни ровно один вызов инструмента. Верни ровно содержимое файла без лишних слов.
+
+  - id: functions_smoke_verify
+    type: shell
+    name: "verify"
+    shell:
+      run: |
+        set -euo pipefail
+        # Найдём каталог с артефактами LLM, предпочитая текущий шаг
+        LLM_DIR=""
+        match=$(find .agent -type d -path "*/llm/functions_smoke_call" | head -n1 || true)
+        if [ -n "$match" ]; then
+          LLM_DIR=$(dirname "$match")
+        fi
+        if [ -z "$LLM_DIR" ]; then
+          for d in .agent/artifacts/llm .agent/test-artifacts/llm; do
+            if [ -d "$d" ]; then LLM_DIR="$d"; break; fi
+          done
+        fi
+        if [ -z "$LLM_DIR" ]; then
+          LLM_DIR=$(find .agent -type d -name llm | head -n1 || true)
+        fi
+        test -n "$LLM_DIR" && test -d "$LLM_DIR" || (echo "no llm artifacts dir found" >&2; exit 1)
+        # Должен быть вызов http_request
+        grep -R -nE '\\"name\\"\s*:\s*\\"http_request\\"|\\"tool\\"\s*:\s*\\"http_request\\"' "$LLM_DIR"
+        # И ответ должен содержать hello (в tool stdout либо в финальном ответе)
+        grep -R -n "hello" "$LLM_DIR"
+      dir: "."
+      timeout: 30s
