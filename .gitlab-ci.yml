@@ -1,5 +1,12 @@
+include:
+  - project: 'backend/ci'
+    ref: 'master'
+    file: 'devsecops.yml'
+
 stages:
+  - linter
   - test
+  - cont
   - sync
 
 unit_tests:
