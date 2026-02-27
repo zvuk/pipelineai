@@ -6,14 +6,20 @@ set -euo pipefail
 
 : "${PAI_BIN:?PAI_BIN is required (path to pipelineai binary)}"
 
+if [ ! -x "$PAI_BIN" ]; then
+  echo "pipelineai binary is not executable: $PAI_BIN" >&2
+  exit 1
+fi
+
 TMP_DIR="${PAI_MOCK_LLM_TMP_DIR:-.agent/mock-llm}"
 URL_FILE="${TMP_DIR}/url.txt"
+LOG_FILE="${TMP_DIR}/mock-llm.log"
 ADDR="${PAI_MOCK_LLM_ADDR:-127.0.0.1:0}"
 
 mkdir -p "$TMP_DIR"
-rm -f "$URL_FILE"
+rm -f "$URL_FILE" "$LOG_FILE"
 
-"$PAI_BIN" mock-llm --addr "$ADDR" --write-url-file "$URL_FILE" >/dev/null 2>&1 &
+"$PAI_BIN" mock-llm --addr "$ADDR" --write-url-file "$URL_FILE" >"$LOG_FILE" 2>&1 &
 pid="$!"
 
 cleanup() {
@@ -30,6 +36,9 @@ for _ in $(seq 1 100); do
 done
 
 if [ ! -s "$URL_FILE" ]; then
+  if [ -s "$LOG_FILE" ]; then
+    cat "$LOG_FILE" >&2
+  fi
   echo "mock llm did not become ready" >&2
   exit 1
 fi

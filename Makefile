@@ -44,22 +44,22 @@ build: ## Собирает бинарь pipelineai в каталоге ./bin
 	GO111MODULE=on go build -o $(BINARY) ./cmd/pipelineai
 
 .PHONY: run-smoke
-run-smoke: ## Запускает smoke-команду llm-smoke (MESSAGE и SYSTEM можно переопределить)
+run-smoke: build ## Запускает smoke-команду llm-smoke (MESSAGE и SYSTEM можно переопределить)
 	@[ -f $(ENV_FILE) ] || $(MAKE) init
 	$(MOCK_LLM_WRAPPER) $(BINARY) llm-smoke --system "$(SYSTEM)" --user "$(MESSAGE)"
 
 .PHONY: run-step
-run-step: ## Запускает один шаг type=llm из конфигурации (CONFIG, STEP, ARTIFACT_DIR можно переопределить)
+run-step: build ## Запускает один шаг type=llm из конфигурации (CONFIG, STEP, ARTIFACT_DIR можно переопределить)
 	@[ -f $(ENV_FILE) ] || $(MAKE) init
 	$(MOCK_LLM_WRAPPER) $(BINARY) run --config "$(CONFIG)" --execute-step "$(STEP)" --artifact-dir "$(ARTIFACT_DIR)" $(RUN_FLAGS)
 
 .PHONY: run-agent-loop
-run-agent-loop: ## Запускает примерную конфигурацию agent-loop smoke (docs/examples/configs/agent-loop-smoke.yaml)
+run-agent-loop: build ## Запускает примерную конфигурацию agent-loop smoke (docs/examples/configs/agent-loop-smoke.yaml)
 	@[ -f $(ENV_FILE) ] || $(MAKE) init
 	$(MOCK_LLM_WRAPPER) $(BINARY) run --config docs/examples/configs/agent-loop-smoke.yaml --execute-step agent_loop_smoke --artifact-dir "$(ARTIFACT_DIR)" $(RUN_FLAGS)
 
 .PHONY: run-smoke-tools
-run-smoke-tools: ## Запускает smoke конфиг с вызовом shell и apply_patch (docs/examples/configs/tools-smoke.yaml)
+run-smoke-tools: build ## Запускает smoke конфиг с вызовом shell и apply_patch (docs/examples/configs/tools-smoke.yaml)
 	@[ -f $(ENV_FILE) ] || $(MAKE) init
 	$(BINARY) run --config docs/examples/configs/tools-smoke.yaml --execute-step tools_smoke_init --artifact-dir "$(ARTIFACT_DIR)" $(RUN_FLAGS)
 	$(MOCK_LLM_WRAPPER) $(BINARY) run --config docs/examples/configs/tools-smoke.yaml --execute-step tools_smoke_shell --artifact-dir "$(ARTIFACT_DIR)" $(RUN_FLAGS)
@@ -67,19 +67,19 @@ run-smoke-tools: ## Запускает smoke конфиг с вызовом shel
 	$(BINARY) run --config docs/examples/configs/tools-smoke.yaml --execute-step tools_smoke_verify --artifact-dir "$(ARTIFACT_DIR)" $(RUN_FLAGS)
 
 .PHONY: run-smoke-functions
-run-smoke-functions: ## Запускает smoke конфиг с кастомной функцией http_request (docs/examples/configs/functions-smoke.yaml)
+run-smoke-functions: build ## Запускает smoke конфиг с кастомной функцией http_request (docs/examples/configs/functions-smoke.yaml)
 	@[ -f $(ENV_FILE) ] || $(MAKE) init
 	$(BINARY) run --config docs/examples/configs/functions-smoke.yaml --execute-step functions_smoke_init --artifact-dir "$(ARTIFACT_DIR)" $(RUN_FLAGS)
 	$(MOCK_LLM_WRAPPER) $(BINARY) run --config docs/examples/configs/functions-smoke.yaml --execute-step functions_smoke_call --artifact-dir "$(ARTIFACT_DIR)" $(RUN_FLAGS)
 	$(BINARY) run --config docs/examples/configs/functions-smoke.yaml --execute-step functions_smoke_verify --artifact-dir "$(ARTIFACT_DIR)" $(RUN_FLAGS)
 
 .PHONY: run-smoke-dag-io
-run-smoke-dag-io: ## Запускает smoke конфиг DAG & I/O (docs/examples/configs/dag-and-io.yaml)
+run-smoke-dag-io: build ## Запускает smoke конфиг DAG & I/O (docs/examples/configs/dag-and-io.yaml)
 	@[ -f $(ENV_FILE) ] || $(MAKE) init
 	$(MOCK_LLM_WRAPPER) $(BINARY) run --config docs/examples/configs/dag-and-io.yaml --execute-step e_llm --artifact-dir "$(ARTIFACT_DIR)" $(RUN_FLAGS)
 
 .PHONY: run-smoke-matrix
-run-smoke-matrix: ## Запускает smoke конфиг matrix (docs/examples/configs/matrix-smoke.yaml)
+run-smoke-matrix: build ## Запускает smoke конфиг matrix (docs/examples/configs/matrix-smoke.yaml)
 	@[ -f $(ENV_FILE) ] || $(MAKE) init
 	rm -rf .agent/*
 	$(BINARY) run --config docs/examples/configs/matrix-smoke.yaml --execute-step run_per_item --artifact-dir "$(ARTIFACT_DIR)" --parallel 2 $(RUN_FLAGS)
