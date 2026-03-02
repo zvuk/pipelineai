@@ -126,6 +126,12 @@ func (e *Executor) runSingleStep(ctx context.Context, step dsl.Step, stepID stri
 		}
 		e.log.Info("step end", slog.String("step", stepID), slog.String("type", "shell"), slog.String("name", name))
 		return nil
+	case "plan":
+		if _, err := e.RunPlanStep(ctx, stepID, nil); err != nil {
+			return err
+		}
+		e.log.Info("step end", slog.String("step", stepID), slog.String("type", "plan"), slog.String("name", name))
+		return nil
 	case "matrix":
 		if err := e.RunMatrixStep(ctx, stepID, parallel); err != nil {
 			return err

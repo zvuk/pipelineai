@@ -96,6 +96,10 @@ type Step struct {
 	// TODO: перепроверить на этапе выполнения GO-1471
 	// Shell — конфигурация шага type: shell
 	Shell *StepShell `yaml:"shell,omitempty"`
+
+	// Plan — конфигурация шага type: plan.
+	// Предназначен для этапов предварительного планирования работ (например, построение манифеста юнитов).
+	Plan *StepPlan `yaml:"plan,omitempty"`
 }
 
 // StepLLM описывает параметры шага type: llm.
@@ -116,6 +120,14 @@ type StepLLM struct {
 // StepShell описывает параметры шага type: shell.
 // TODO: перепроверить на этапе выполнения GO-1471
 type StepShell struct {
+	Run     TemplateString `yaml:"run"`
+	Dir     TemplateString `yaml:"dir,omitempty"`
+	Timeout *Duration      `yaml:"timeout,omitempty"`
+}
+
+// StepPlan описывает параметры шага type: plan.
+// По контракту он аналогичен shell-шагу, но семантически используется для вычисления стратегии выполнения.
+type StepPlan struct {
 	Run     TemplateString `yaml:"run"`
 	Dir     TemplateString `yaml:"dir,omitempty"`
 	Timeout *Duration      `yaml:"timeout,omitempty"`

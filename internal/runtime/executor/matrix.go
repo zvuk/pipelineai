@@ -162,6 +162,8 @@ func (e *Executor) RunMatrixStep(ctx context.Context, stepID string, parallel in
 					_, _, lastErr = e.RunLLMStep(ctx, runStepID, extra)
 				case "shell":
 					_, lastErr = e.RunShellStep(ctx, runStepID, extra)
+				case "plan":
+					_, lastErr = e.RunPlanStep(ctx, runStepID, extra)
 				default:
 					lastErr = fmt.Errorf("executor: matrix.run.step %s unsupported type: %s", runStepID, tplStep.Type)
 				}

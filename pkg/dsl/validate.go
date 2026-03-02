@@ -72,6 +72,20 @@ func Validate(cfg *Config) error {
 			if strings.HasPrefix(lower, "bash ") || strings.Contains(lower, "bash -lc") {
 				problems = append(problems, fmt.Sprintf("%s: shell.run must not include an explicit 'bash -lc' invocation", path))
 			}
+		case "plan":
+			if step.Plan == nil {
+				problems = append(problems, fmt.Sprintf("%s: failed to parse plan step configuration", path))
+				continue
+			}
+			if step.Plan.Run.IsZero() {
+				problems = append(problems, fmt.Sprintf("%s: plan.run is required", path))
+			}
+			// Аналогично shell.run: явный bash -lc внутри скрипта запрещён.
+			runRaw := strings.TrimSpace(step.Plan.Run.String())
+			lower := strings.ToLower(runRaw)
+			if strings.HasPrefix(lower, "bash ") || strings.Contains(lower, "bash -lc") {
+				problems = append(problems, fmt.Sprintf("%s: plan.run must not include an explicit 'bash -lc' invocation", path))
+			}
 		case "matrix":
 			if step.Matrix == nil {
 				problems = append(problems, fmt.Sprintf("%s: failed to parse matrix step configuration", path))
@@ -157,8 +171,8 @@ func Validate(cfg *Config) error {
 		if !ref.Template {
 			problems = append(problems, fmt.Sprintf("steps[%d].run.step=%q must be a template step (template: true)", i, s.Run.Step))
 		}
-		if ref.Type != "llm" && ref.Type != "shell" {
-			problems = append(problems, fmt.Sprintf("steps[%d].run.step=%q must be of type 'llm' or 'shell'", i, s.Run.Step))
+		if ref.Type != "llm" && ref.Type != "shell" && ref.Type != "plan" {
+			problems = append(problems, fmt.Sprintf("steps[%d].run.step=%q must be of type 'llm', 'shell' or 'plan'", i, s.Run.Step))
 		}
 	}
 
