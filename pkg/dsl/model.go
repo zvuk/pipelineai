@@ -96,6 +96,10 @@ type Step struct {
 	// TODO: перепроверить на этапе выполнения GO-1471
 	// Shell — конфигурация шага type: shell
 	Shell *StepShell `yaml:"shell,omitempty"`
+
+	// Plan — конфигурация шага type: plan.
+	// Предназначен для этапов предварительного планирования работ (например, построение манифеста юнитов).
+	Plan *StepPlan `yaml:"plan,omitempty"`
 }
 
 // StepLLM описывает параметры шага type: llm.
@@ -119,6 +123,57 @@ type StepShell struct {
 	Run     TemplateString `yaml:"run"`
 	Dir     TemplateString `yaml:"dir,omitempty"`
 	Timeout *Duration      `yaml:"timeout,omitempty"`
+}
+
+// StepPlan описывает параметры шага type: plan.
+// По контракту он аналогичен shell-шагу, но семантически используется для вычисления стратегии выполнения.
+type StepPlan struct {
+	// Engine — движок выполнения планировщика.
+	// Пусто или "shell" => выполняется plan.run через bash.
+	// "partition" => запускается встроенный движок разбиения элементов.
+	Engine string `yaml:"engine,omitempty"`
+	// Partition — параметры встроенного движка partition.
+	Partition *StepPlanPartition `yaml:"partition,omitempty"`
+
+	Run     TemplateString `yaml:"run,omitempty"`
+	Dir     TemplateString `yaml:"dir,omitempty"`
+	Timeout *Duration      `yaml:"timeout,omitempty"`
+}
+
+// StepPlanPartition описывает параметры встроенного движка plan.engine=partition.
+// Движок читает исходный набор элементов, классифицирует их приоритет и формирует manifest для matrix.
+type StepPlanPartition struct {
+	// SourcePath — путь к YAML/JSON с исходным набором элементов.
+	SourcePath TemplateString `yaml:"source_path"`
+	// Select — dot-путь до массива элементов в SourcePath (по умолчанию "items").
+	Select string `yaml:"select,omitempty"`
+
+	// ManifestJSONPath и ManifestYAMLPath — пути вывода результирующего manifest.
+	ManifestJSONPath TemplateString `yaml:"manifest_json_path"`
+	ManifestYAMLPath TemplateString `yaml:"manifest_yaml_path"`
+
+	// Параметры стратегии разбиения.
+	SwitchToBucketsAt TemplateString `yaml:"switch_to_buckets_at,omitempty"`
+	BucketMaxItems    TemplateString `yaml:"bucket_max_items,omitempty"`
+	BucketMaxWeight   TemplateString `yaml:"bucket_max_weight,omitempty"`
+	PriorityWeight    TemplateString `yaml:"priority_weight,omitempty"`
+
+	// Декларативные правила приоритетной классификации.
+	PriorityAnyGlob    []string `yaml:"priority_any_glob,omitempty"`
+	NonPriorityAnyGlob []string `yaml:"non_priority_any_glob,omitempty"`
+	PriorityAnyExt     []string `yaml:"priority_any_ext,omitempty"`
+	NonPriorityAnyExt  []string `yaml:"non_priority_any_ext,omitempty"`
+
+	// Дополнительные эвристики приоритета.
+	LightweightAnyExt   []string `yaml:"lightweight_any_ext,omitempty"`
+	PriorityPathMarkers []string `yaml:"priority_path_markers,omitempty"`
+
+	// Опциональная материализация ресурсов для каждого юнита.
+	UnitResourcesDir   TemplateString `yaml:"unit_resources_dir,omitempty"`
+	BasePromptPath     TemplateString `yaml:"base_prompt_path,omitempty"`
+	BaseRulesDir       TemplateString `yaml:"base_rules_dir,omitempty"`
+	OverrideConfigPath TemplateString `yaml:"override_config_path,omitempty"`
+	OverrideProfile    TemplateString `yaml:"override_profile,omitempty"`
 }
 
 // StepMatrix описывает параметры шага type: matrix.

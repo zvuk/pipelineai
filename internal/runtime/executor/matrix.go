@@ -162,6 +162,8 @@ func (e *Executor) RunMatrixStep(ctx context.Context, stepID string, parallel in
 					_, _, lastErr = e.RunLLMStep(ctx, runStepID, extra)
 				case "shell":
 					_, lastErr = e.RunShellStep(ctx, runStepID, extra)
+				case "plan":
+					_, lastErr = e.RunPlanStep(ctx, runStepID, extra)
 				default:
 					lastErr = fmt.Errorf("executor: matrix.run.step %s unsupported type: %s", runStepID, tplStep.Type)
 				}
@@ -200,24 +202,19 @@ func (e *Executor) RunMatrixStep(ctx context.Context, stepID string, parallel in
 			if lastErr == nil {
 				status["ok"] = true
 			} else {
+				finalFailAttrs := []any{
+					slog.String("step", stepID),
+					slog.String("run_step", runStepID),
+					slog.String("item_id", itemID),
+					slog.Int("retries", childAttempts),
+					slog.String("error", lastErr.Error()),
+				}
 				// Все попытки исчерпаны
 				if childAllowFailure {
-					e.log.Error("matrix item failed after retries, allowed to fail",
-						slog.String("step", stepID),
-						slog.String("run_step", runStepID),
-						slog.String("item_id", itemID),
-						slog.Int("retries", childAttempts),
-						slog.String("error", lastErr.Error()),
-					)
+					e.log.Error("matrix item failed after retries, allowed to fail", finalFailAttrs...)
 					// Не пробрасываем ошибку наверх, сценарий продолжает выполнение.
 				} else {
-					e.log.Error("matrix item failed after retries",
-						slog.String("step", stepID),
-						slog.String("run_step", runStepID),
-						slog.String("item_id", itemID),
-						slog.Int("retries", childAttempts),
-						slog.String("error", lastErr.Error()),
-					)
+					e.log.Error("matrix item failed after retries", finalFailAttrs...)
 					errs <- lastErr
 				}
 			}

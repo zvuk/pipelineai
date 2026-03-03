@@ -68,23 +68,8 @@ func (e *Executor) RunWithNeeds(ctx context.Context, target string, parallel int
 				return err
 			}
 		}
-		// Рассчитать следующую волну
-		next := make([]string, 0)
-		for u, outs := range edges {
-			if !done[u] {
-				continue
-			}
-			for _, v := range outs {
-				if done[v] {
-					continue
-				}
-				indegree[v]--
-				if indegree[v] == 0 {
-					next = append(next, v)
-				}
-			}
-		}
-		ready = next
+		// Рассчитать следующую волну.
+		ready = nextReadyWave(done, edges, indegree)
 	}
 	if !done[target] {
 		return fmt.Errorf("executor: target step %s is marked as template and cannot be executed", target)
@@ -129,6 +114,7 @@ func (e *Executor) RunAll(ctx context.Context, parallel int) error {
 		}
 	}
 
+	var mu sync.Mutex
 	done := map[string]bool{}
 	for len(ready) > 0 {
 		var wg sync.WaitGroup
@@ -142,7 +128,9 @@ func (e *Executor) RunAll(ctx context.Context, parallel int) error {
 				return fmt.Errorf("executor: step %s not found", sid)
 			}
 			if step.Template {
+				mu.Lock()
 				done[sid] = true
+				mu.Unlock()
 				continue
 			}
 			wg.Add(1)
@@ -155,7 +143,9 @@ func (e *Executor) RunAll(ctx context.Context, parallel int) error {
 					errs <- err
 					return
 				}
+				mu.Lock()
 				done[sid] = true
+				mu.Unlock()
 			}()
 		}
 		wg.Wait()
@@ -165,23 +155,8 @@ func (e *Executor) RunAll(ctx context.Context, parallel int) error {
 				return err
 			}
 		}
-		// Следующая волна
-		next := make([]string, 0)
-		for u, outs := range edges {
-			if !done[u] {
-				continue
-			}
-			for _, v := range outs {
-				if done[v] {
-					continue
-				}
-				indegree[v]--
-				if indegree[v] == 0 {
-					next = append(next, v)
-				}
-			}
-		}
-		ready = next
+		// Следующая волна.
+		ready = nextReadyWave(done, edges, indegree)
 	}
 
 	e.muSteps.RLock()
@@ -203,6 +178,26 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// nextReadyWave вычисляет следующий слой DAG на основе выполненных узлов.
+func nextReadyWave(done map[string]bool, edges map[string][]string, indegree map[string]int) []string {
+	next := make([]string, 0)
+	for u, outs := range edges {
+		if !done[u] {
+			continue
+		}
+		for _, v := range outs {
+			if done[v] {
+				continue
+			}
+			indegree[v]--
+			if indegree[v] == 0 {
+				next = append(next, v)
+			}
+		}
+	}
+	return next
 }
 
 // subgraph строит множество узлов подграфа (target + все его зависимости), рёбра и входные степени

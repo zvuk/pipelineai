@@ -156,7 +156,13 @@ func validatePromptPath(baseDir string, stepIdx int, fieldName string, tpl Templ
 	if tpl.IsZero() {
 		return ""
 	}
-	p, _ := tpl.Execute(nil)
+	p, err := tpl.Execute(nil)
+	if err != nil {
+		// Шаблон пути может зависеть от runtime-контекста (.matrix/.outputs и т.п.),
+		// который недоступен на этапе загрузки конфигурации.
+		// В этом случае пропускаем строгую проверку существования и валидируем путь во время выполнения шага.
+		return ""
+	}
 	p = strings.TrimSpace(p)
 	if p == "" {
 		return fmt.Sprintf("steps[%d]: %s evaluated to empty", stepIdx, fieldName)
