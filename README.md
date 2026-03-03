@@ -26,6 +26,7 @@
 - [🔧 Типы шагов](#типы-шагов)
   - [5.1. `shell`](#51-shell)
   - [5.2. `plan`](#52-plan)
+    - [5.2.1. Как работает чанкование в `partition`](#521-как-работает-чанкование-в-partition)
   - [5.3. `llm`](#53-llm)
   - [5.4. `matrix` и поэлементный запуск](#54-matrix-и-поэлементный-запуск)
 - [🗣️ Промпты для `llm`‑шагов](#промпты-для-llm-шагов)
@@ -318,30 +319,99 @@ functions:
 
 ### 5.2. `plan`
 
-Шаг `plan` семантически используется для построения стратегии выполнения:
+Шаг `plan` используется для построения стратегии выполнения и поддерживает два режима:
+
+- `plan.engine: shell` (по умолчанию) — выполнение `plan.run` через `bash -lc`;
+- `plan.engine: partition` — встроенный движок декларативного разбиения элементов.
 
 ```yaml
 - id: plan_review_units
   type: plan
   name: "Build review units strategy"
   plan:
-    dir: "."
-    run: |
-      set -euo pipefail
-      # соберите входные данные и сформируйте manifest для matrix-шага
-      echo '{"items":[]}' > .agent/artifacts/plan/review-units.json
+    engine: partition
+    partition:
+      source_path: ".agent/artifacts/plan/review-candidates.json"
+      select: "items"
+      manifest_json_path: ".agent/artifacts/plan/review-units.json"
+      manifest_yaml_path: ".agent/artifacts/plan/review-units.yaml"
+      switch_to_buckets_at: 40
+      bucket_max_items: 4
+      bucket_max_weight: 700
+      priority_weight: 220
+      priority_any_ext: [".go", ".ts", ".py"]
+      priority_any_glob: ["**/auth/**", "**/security/**"]
+      non_priority_any_ext: [".md", ".txt"]
   outputs:
     - id: review_units
       type: file
       from: path
-      path: ".agent/artifacts/plan/review-units.json"
+      path: ".agent/artifacts/plan/review-units.yaml"
 ```
 
 Особенности:
 
-- `plan` выполняется как `bash -lc`, как и `shell`, но выделен отдельным типом для явного описания этапа стратегии;
+- `plan.engine=shell`: `plan.run` обязателен и проверяется аналогично `shell.run`;
+- `plan.engine=partition`: `plan.partition.*` задаёт стратегию приоритизации и чанкования;
 - `outputs` поддерживаются так же, как у `shell` (включая `from: path`);
 - `plan` можно использовать как обычный шаг DAG или как `template` для `matrix`.
+
+### 5.2.1. Как работает чанкование в `partition`
+
+Вход для `partition` — массив элементов. Обычно это файлы, где каждый элемент содержит:
+
+- `file_path` — путь;
+- `item_hash` — стабильный хэш версии элемента (например, хэш diff);
+- `item_weight` — «вес» элемента (например, число изменённых строк).
+
+Дальше движок делает 4 шага:
+
+1. Определяет режим:
+   - если элементов меньше `switch_to_buckets_at` — делает по одному юниту на элемент;
+   - если элементов больше/равно порогу — включает bucket-режим.
+2. Делит элементы на `priority` и `non-priority`:
+   - `priority_any_glob`/`priority_any_ext` помечают элемент как приоритетный;
+   - `non_priority_any_glob`/`non_priority_any_ext` снимают приоритет;
+   - дополнительно учитывается `item_weight` и `priority_weight`.
+3. Формирует юниты:
+   - приоритетные элементы идут отдельными юнитами (чтобы не потерять фокус);
+   - не приоритетные собираются в группы, пока не достигнут `bucket_max_items` или `bucket_max_weight`.
+4. Пишет manifest (`items`) для `matrix`-шага.
+
+Итог: для небольших изменений вы получаете детальный поэлементный прогон, а для больших — контролируемое число юнитов без взрыва по количеству LLM-вызовов.
+
+Пример для большого MR/PR (code review):
+
+```yaml
+- id: build_review_units
+  type: plan
+  plan:
+    engine: partition
+    partition:
+      source_path: ".agent/artifacts/plan/review-candidates.json"
+      select: "items"
+      manifest_json_path: ".agent/artifacts/plan/review-units.json"
+      manifest_yaml_path: ".agent/artifacts/plan/review-units.yaml"
+
+      # Переключаемся на bucket-режим с 50 файлов
+      switch_to_buckets_at: 50
+      bucket_max_items: 5
+      bucket_max_weight: 800
+      priority_weight: 250
+
+      # Критичные зоны и типы файлов — в приоритет
+      priority_any_glob: ["**/auth/**", "**/security/**", "**/billing/**"]
+      priority_any_ext: [".go", ".ts", ".py", ".sql"]
+
+      # Документация/метаданные — в неприоритетные
+      non_priority_any_ext: [".md", ".txt", ".json", ".yaml", ".yml"]
+```
+
+Что будет в таком MR/PR:
+
+- 2-3 файла из `auth/security` скорее всего станут отдельными `unit_type: file`;
+- массовые изменения в `docs/*.md` и конфигах соберутся в несколько `unit_type: group`;
+- `matrix` затем выполнит review-шаг по каждому юниту из manifest.
 
 ### 5.3. `llm`
 

@@ -3,6 +3,7 @@ package dsl
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -58,34 +59,14 @@ func Validate(cfg *Config) error {
 				problems = append(problems, fmt.Sprintf("%s: user_prompt or user_prompt_path is required", path))
 			}
 		case "shell":
-			if step.Shell == nil {
+			runTpl, ok := bashRunTemplateForStep(step)
+			if !ok {
 				problems = append(problems, fmt.Sprintf("%s: failed to parse shell step configuration", path))
 				continue
 			}
-			if step.Shell.Run.IsZero() {
-				problems = append(problems, fmt.Sprintf("%s: shell.run is required", path))
-			}
-			// Дополнительная защита: run уже исполняется через "bash -lc" раннером
-			// Пользователь не должен вкладывать явный вызов bash -lc внутрь шаблона
-			runRaw := strings.TrimSpace(step.Shell.Run.String())
-			lower := strings.ToLower(runRaw)
-			if strings.HasPrefix(lower, "bash ") || strings.Contains(lower, "bash -lc") {
-				problems = append(problems, fmt.Sprintf("%s: shell.run must not include an explicit 'bash -lc' invocation", path))
-			}
+			validateBashRunTemplate(path, "shell", runTpl, &problems)
 		case "plan":
-			if step.Plan == nil {
-				problems = append(problems, fmt.Sprintf("%s: failed to parse plan step configuration", path))
-				continue
-			}
-			if step.Plan.Run.IsZero() {
-				problems = append(problems, fmt.Sprintf("%s: plan.run is required", path))
-			}
-			// Аналогично shell.run: явный bash -lc внутри скрипта запрещён.
-			runRaw := strings.TrimSpace(step.Plan.Run.String())
-			lower := strings.ToLower(runRaw)
-			if strings.HasPrefix(lower, "bash ") || strings.Contains(lower, "bash -lc") {
-				problems = append(problems, fmt.Sprintf("%s: plan.run must not include an explicit 'bash -lc' invocation", path))
-			}
+			validatePlanStep(path, step, &problems)
 		case "matrix":
 			if step.Matrix == nil {
 				problems = append(problems, fmt.Sprintf("%s: failed to parse matrix step configuration", path))
@@ -186,6 +167,121 @@ func Validate(cfg *Config) error {
 	}
 
 	return fmt.Errorf("dsl: configuration errors:\n - %s", strings.Join(problems, "\n - "))
+}
+
+// validateBashRunTemplate проверяет общие правила для run-шаблонов shell/plan шагов.
+func validateBashRunTemplate(path string, stepType string, run TemplateString, problems *[]string) {
+	if run.IsZero() {
+		*problems = append(*problems, fmt.Sprintf("%s: %s.run is required", path, stepType))
+		return
+	}
+	// Скрипт уже исполняется через "bash -lc" раннером, поэтому вложенный вызов запрещён.
+	runRaw := strings.TrimSpace(run.String())
+	lower := strings.ToLower(runRaw)
+	if strings.HasPrefix(lower, "bash ") || strings.Contains(lower, "bash -lc") {
+		*problems = append(*problems, fmt.Sprintf("%s: %s.run must not include an explicit 'bash -lc' invocation", path, stepType))
+	}
+}
+
+func validatePlanStep(path string, step Step, problems *[]string) {
+	if step.Plan == nil {
+		*problems = append(*problems, fmt.Sprintf("%s: failed to parse plan step configuration", path))
+		return
+	}
+
+	engine := strings.ToLower(strings.TrimSpace(step.Plan.Engine))
+	if engine == "" || engine == "shell" {
+		validateBashRunTemplate(path, "plan", step.Plan.Run, problems)
+		return
+	}
+
+	if engine != "partition" {
+		*problems = append(*problems, fmt.Sprintf("%s: unsupported plan.engine %q (supported: shell, partition)", path, step.Plan.Engine))
+		return
+	}
+	if !step.Plan.Run.IsZero() {
+		*problems = append(*problems, fmt.Sprintf("%s: plan.run must be empty when plan.engine=partition", path))
+	}
+
+	p := step.Plan.Partition
+	if p == nil {
+		*problems = append(*problems, fmt.Sprintf("%s.plan.partition is required when plan.engine=partition", path))
+		return
+	}
+	if p.SourcePath.IsZero() {
+		*problems = append(*problems, fmt.Sprintf("%s.plan.partition.source_path is required", path))
+	}
+	if p.ManifestJSONPath.IsZero() {
+		*problems = append(*problems, fmt.Sprintf("%s.plan.partition.manifest_json_path is required", path))
+	}
+	if p.ManifestYAMLPath.IsZero() {
+		*problems = append(*problems, fmt.Sprintf("%s.plan.partition.manifest_yaml_path is required", path))
+	}
+
+	// Если включена материализация unit-ресурсов, базовые пути обязательны.
+	if !p.UnitResourcesDir.IsZero() {
+		if p.BasePromptPath.IsZero() {
+			*problems = append(*problems, fmt.Sprintf("%s.plan.partition.base_prompt_path is required when unit_resources_dir is set", path))
+		}
+		if p.BaseRulesDir.IsZero() {
+			*problems = append(*problems, fmt.Sprintf("%s.plan.partition.base_rules_dir is required when unit_resources_dir is set", path))
+		}
+	}
+
+	validateOptionalNonNegativeIntTemplate(
+		path+".plan.partition.switch_to_buckets_at",
+		p.SwitchToBucketsAt,
+		problems,
+	)
+	validateOptionalNonNegativeIntTemplate(
+		path+".plan.partition.bucket_max_items",
+		p.BucketMaxItems,
+		problems,
+	)
+	validateOptionalNonNegativeIntTemplate(
+		path+".plan.partition.bucket_max_weight",
+		p.BucketMaxWeight,
+		problems,
+	)
+	validateOptionalNonNegativeIntTemplate(
+		path+".plan.partition.priority_weight",
+		p.PriorityWeight,
+		problems,
+	)
+}
+
+func bashRunTemplateForStep(step Step) (TemplateString, bool) {
+	switch step.Type {
+	case "shell":
+		if step.Shell == nil {
+			return TemplateString{}, false
+		}
+		return step.Shell.Run, true
+	default:
+		return TemplateString{}, false
+	}
+}
+
+func validateOptionalNonNegativeIntTemplate(path string, tpl TemplateString, problems *[]string) {
+	if tpl.IsZero() {
+		return
+	}
+	raw := strings.TrimSpace(tpl.String())
+	if raw == "" {
+		return
+	}
+	// Если значение вычисляется шаблоном во время выполнения, проверим его уже в рантайме.
+	if strings.Contains(raw, "{{") {
+		return
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		*problems = append(*problems, fmt.Sprintf("%s must be a non-negative integer", path))
+		return
+	}
+	if n < 0 {
+		*problems = append(*problems, fmt.Sprintf("%s must be >= 0", path))
+	}
 }
 
 // validateApprovers валидирует массив approvers для инструмента.

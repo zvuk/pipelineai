@@ -202,24 +202,19 @@ func (e *Executor) RunMatrixStep(ctx context.Context, stepID string, parallel in
 			if lastErr == nil {
 				status["ok"] = true
 			} else {
+				finalFailAttrs := []any{
+					slog.String("step", stepID),
+					slog.String("run_step", runStepID),
+					slog.String("item_id", itemID),
+					slog.Int("retries", childAttempts),
+					slog.String("error", lastErr.Error()),
+				}
 				// Все попытки исчерпаны
 				if childAllowFailure {
-					e.log.Error("matrix item failed after retries, allowed to fail",
-						slog.String("step", stepID),
-						slog.String("run_step", runStepID),
-						slog.String("item_id", itemID),
-						slog.Int("retries", childAttempts),
-						slog.String("error", lastErr.Error()),
-					)
+					e.log.Error("matrix item failed after retries, allowed to fail", finalFailAttrs...)
 					// Не пробрасываем ошибку наверх, сценарий продолжает выполнение.
 				} else {
-					e.log.Error("matrix item failed after retries",
-						slog.String("step", stepID),
-						slog.String("run_step", runStepID),
-						slog.String("item_id", itemID),
-						slog.Int("retries", childAttempts),
-						slog.String("error", lastErr.Error()),
-					)
+					e.log.Error("matrix item failed after retries", finalFailAttrs...)
 					errs <- lastErr
 				}
 			}

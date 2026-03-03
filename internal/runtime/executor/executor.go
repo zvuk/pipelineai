@@ -1,12 +1,9 @@
 package executor
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -120,17 +117,11 @@ func (e *Executor) runSingleStep(ctx context.Context, step dsl.Step, stepID stri
 		}
 		e.log.Info("step end", slog.String("step", stepID), slog.String("type", "llm"), slog.String("name", name), slog.String("artifact_path", path))
 		return nil
-	case "shell":
-		if _, err := e.RunShellStep(ctx, stepID, nil); err != nil {
+	case "shell", "plan":
+		if err := e.runBashTypeStep(ctx, step.Type, stepID); err != nil {
 			return err
 		}
-		e.log.Info("step end", slog.String("step", stepID), slog.String("type", "shell"), slog.String("name", name))
-		return nil
-	case "plan":
-		if _, err := e.RunPlanStep(ctx, stepID, nil); err != nil {
-			return err
-		}
-		e.log.Info("step end", slog.String("step", stepID), slog.String("type", "plan"), slog.String("name", name))
+		e.log.Info("step end", slog.String("step", stepID), slog.String("type", step.Type), slog.String("name", name))
 		return nil
 	case "matrix":
 		if err := e.RunMatrixStep(ctx, stepID, parallel); err != nil {
@@ -140,6 +131,20 @@ func (e *Executor) runSingleStep(ctx context.Context, step dsl.Step, stepID stri
 		return nil
 	default:
 		return fmt.Errorf("executor: unsupported step type: %s", step.Type)
+	}
+}
+
+// runBashTypeStep запускает шаги, которые исполняются через bash-раннер.
+func (e *Executor) runBashTypeStep(ctx context.Context, stepType string, stepID string) error {
+	switch stepType {
+	case "shell":
+		_, err := e.RunShellStep(ctx, stepID, nil)
+		return err
+	case "plan":
+		_, err := e.RunPlanStep(ctx, stepID, nil)
+		return err
+	default:
+		return fmt.Errorf("executor: unsupported bash-like step type: %s", stepType)
 	}
 }
 
@@ -214,19 +219,7 @@ func (e *Executor) RunShellStep(ctx context.Context, stepID string, extra map[st
 	if err != nil {
 		return "", err
 	}
-	// Контекст для шаблонов шага shell
-	tctx := map[string]any{
-		"agent":    e.templateAgent(),
-		"step":     templateStep(step),
-		"defaults": e.templateDefaults(),
-		"inputs":   inputsToTemplate(inputs),
-		"outputs":  e.outputsContext(),
-	}
-	if extra != nil {
-		for k, v := range extra {
-			tctx[k] = v
-		}
-	}
+	tctx := e.renderStepContext(step, inputs, extra)
 	run, err := step.Shell.Run.Execute(tctx)
 	if err != nil {
 		return "", fmt.Errorf("executor: failed to render shell.run for step %s: %w", stepID, err)
@@ -237,45 +230,21 @@ func (e *Executor) RunShellStep(ctx context.Context, stepID string, extra map[st
 	if err != nil {
 		return "", fmt.Errorf("executor: failed to render shell.dir for step %s: %w", stepID, err)
 	}
-	timeout := 5 * time.Minute
-	if step.Shell.Timeout != nil {
-		timeout = step.Shell.Timeout.Duration
-	}
-	// Запускаем bash -lc "run"
-	shCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	cmd := exec.CommandContext(shCtx, "bash", "-lc", run)
-	if strings.TrimSpace(dir) != "" {
-		cmd.Dir = strings.TrimSpace(dir)
-	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	// Переменные окружения шага
-	if len(step.Env) > 0 {
-		env := os.Environ()
-		for k, v := range step.Env {
-			rv, rerr := dsl.RenderStringWithDefaults(v, tctx)
-			if rerr != nil {
-				return "", fmt.Errorf("executor: failed to render env %s for step %s: %v", k, stepID, rerr)
-			}
-			env = append(env, fmt.Sprintf("%s=%s", k, rv))
-		}
-		cmd.Env = env
-	}
-	err = cmd.Run()
+	timeout := stepTimeoutOrDefault(step.Shell.Timeout)
+
+	stdout, stderr, err := runBashStep(ctx, run, dir, timeout, "shell", stepID, step.Env, tctx)
 	if err != nil {
-		return "", fmt.Errorf("executor: shell step failed: %v, stderr: %s", err, stderr.String())
+		return "", err
 	}
 	// Обработка outputs для shell шага
-	if err := e.processShellOutputs(step, stdout.String(), stderr.String(), inputs, extra); err != nil {
+	if err := e.processShellOutputs(step, stdout, stderr, inputs, extra); err != nil {
 		return "", err
 	}
 	// DEBUG: при конце шага — аутпуты и лог (обрезанные)
 	e.log.Debug("shell step outputs",
 		slog.String("step", stepID),
-		slog.String("stdout", crop(stdout.String(), 150)),
-		slog.String("stderr", crop(stderr.String(), 150)),
+		slog.String("stdout", crop(stdout, 150)),
+		slog.String("stderr", crop(stderr, 150)),
 	)
 	e.log.Info("shell step done", slog.String("step", stepID))
 	return "", nil
