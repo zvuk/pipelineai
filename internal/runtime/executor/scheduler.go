@@ -35,6 +35,7 @@ func (e *Executor) RunWithNeeds(ctx context.Context, target string, parallel int
 	for len(ready) > 0 {
 		var wg sync.WaitGroup
 		errs := make(chan error, len(ready))
+		completedWave := make([]string, 0, len(ready))
 		for _, id := range ready {
 			sid := id
 			step, ok := e.getStep(sid)
@@ -44,6 +45,7 @@ func (e *Executor) RunWithNeeds(ctx context.Context, target string, parallel int
 			if step.Template {
 				mu.Lock()
 				done[sid] = true
+				completedWave = append(completedWave, sid)
 				mu.Unlock()
 				continue
 			}
@@ -58,6 +60,7 @@ func (e *Executor) RunWithNeeds(ctx context.Context, target string, parallel int
 				}
 				mu.Lock()
 				done[sid] = true
+				completedWave = append(completedWave, sid)
 				mu.Unlock()
 			}()
 		}
@@ -69,7 +72,7 @@ func (e *Executor) RunWithNeeds(ctx context.Context, target string, parallel int
 			}
 		}
 		// Рассчитать следующую волну.
-		ready = nextReadyWave(done, edges, indegree)
+		ready = nextReadyWave(completedWave, done, edges, indegree)
 	}
 	if !done[target] {
 		return fmt.Errorf("executor: target step %s is marked as template and cannot be executed", target)
@@ -119,6 +122,7 @@ func (e *Executor) RunAll(ctx context.Context, parallel int) error {
 	for len(ready) > 0 {
 		var wg sync.WaitGroup
 		errs := make(chan error, len(ready))
+		completedWave := make([]string, 0, len(ready))
 		// Ограничиваем параллелизм волны
 		sem := make(chan struct{}, max(1, parallel))
 		for _, id := range ready {
@@ -130,6 +134,7 @@ func (e *Executor) RunAll(ctx context.Context, parallel int) error {
 			if step.Template {
 				mu.Lock()
 				done[sid] = true
+				completedWave = append(completedWave, sid)
 				mu.Unlock()
 				continue
 			}
@@ -145,6 +150,7 @@ func (e *Executor) RunAll(ctx context.Context, parallel int) error {
 				}
 				mu.Lock()
 				done[sid] = true
+				completedWave = append(completedWave, sid)
 				mu.Unlock()
 			}()
 		}
@@ -156,7 +162,7 @@ func (e *Executor) RunAll(ctx context.Context, parallel int) error {
 			}
 		}
 		// Следующая волна.
-		ready = nextReadyWave(done, edges, indegree)
+		ready = nextReadyWave(completedWave, done, edges, indegree)
 	}
 
 	e.muSteps.RLock()
@@ -180,19 +186,26 @@ func max(a, b int) int {
 	return b
 }
 
-// nextReadyWave вычисляет следующий слой DAG на основе выполненных узлов.
-func nextReadyWave(done map[string]bool, edges map[string][]string, indegree map[string]int) []string {
+// nextReadyWave вычисляет следующий слой DAG на основе шагов,
+// завершённых в текущей волне, чтобы не декрементить зависимости повторно.
+func nextReadyWave(completed []string, done map[string]bool, edges map[string][]string, indegree map[string]int) []string {
 	next := make([]string, 0)
-	for u, outs := range edges {
+	seen := make(map[string]struct{})
+	for _, u := range completed {
 		if !done[u] {
 			continue
 		}
+		outs := edges[u]
 		for _, v := range outs {
 			if done[v] {
 				continue
 			}
 			indegree[v]--
 			if indegree[v] == 0 {
+				if _, ok := seen[v]; ok {
+					continue
+				}
+				seen[v] = struct{}{}
 				next = append(next, v)
 			}
 		}
