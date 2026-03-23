@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/zvuk/pipelineai/internal/runtime/llm"
+	"github.com/zvuk/pipelineai/internal/runtime/tokens"
 	"github.com/zvuk/pipelineai/internal/tools/registry"
 	"github.com/zvuk/pipelineai/pkg/artifacts"
 	"github.com/zvuk/pipelineai/pkg/dsl"
@@ -28,6 +29,7 @@ type Executor struct {
 	stepByID  map[string]dsl.Step
 	muSteps   sync.RWMutex
 	tools     *registry.Registry
+	tokenizer tokens.Counter
 	// produced — накопленные выходы шагов для подстановки в шаблоны последующих шагов
 	produced map[string]map[string]ioValue
 	muProd   sync.RWMutex
@@ -184,6 +186,7 @@ func New(cfg *dsl.Config, client LLMClient, artifactDir string, log *slog.Logger
 		log:       log.With(slog.String("component", "executor")),
 		stepByID:  stepByID,
 		tools:     registry.New(cfg),
+		tokenizer: tokens.NewManager(cfg, log),
 	}, nil
 }
 
