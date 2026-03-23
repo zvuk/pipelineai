@@ -66,6 +66,10 @@ PAI читает настройки LLM из `.env` (если он есть) и 
 - `LLM_API_KEY` — ключ (опционально для локальных рантаймов)
 - `LLM_REQUEST_TIMEOUT` — таймаут запроса к LLM
 
+Для локальной сборки из этого репозитория рекомендуется `make build`: цель автоматически подтягивает `libtokenizers.a` и включает exact tokenizer backend (`tokenizers_hf`) для model-specific подсчёта токенов.
+
+Если собирать бинарь напрямую через `go build`/`go install` без тега `tokenizers_hf`, PAI всё равно будет работать, но для неизвестных или неподдержанных exact-backend моделей переключится на byte-based fallback для предрасчётов.
+
 ---
 
 ## ⚡ Быстрый старт: AI‑ревью в GitHub Actions
@@ -201,6 +205,10 @@ agent:
   name: pai-ai-review
   model: "openai/gpt-oss-20b"
   artifact_dir: .agent/artifacts
+  model_context_window: 131072
+  tool_output_warn_percent: 10
+  auto_compact_percent: 85
+  tokenizer_cache_dir: .agent/cache/tokenizers
   openai:
     base_url: '{{ env "LLM_BASE_URL" "http://localhost:1234/v1" }}'
     api_key_env: LLM_API_KEY
@@ -226,6 +234,10 @@ steps:
 - `artifact_dir` — корень для артефактов сценария (обычно `.agent/artifacts`).
 - `openai.base_url` — URL совместимого API.
 - `openai.api_key_env` — имя переменной окружения с API‑ключом модели.
+- `model_context_window` — явное переопределение размера контекстного окна модели в токенах.
+- `tool_output_warn_percent` — порог, после которого tool result сначала заменяется warning вместо полного payload. По умолчанию `10`.
+- `auto_compact_percent` — порог автоматического сжатия истории через LLM compaction. По умолчанию `85`.
+- `tokenizer_cache_dir` — каталог для кэша model-specific tokenizer файлов.
 
 Дополнительно в шаблонах доступны функции, например:
 
@@ -278,6 +290,18 @@ functions:
 
 - `shell` — выполнение команд;
 - `apply_patch` — безопасное применение патчей к файлам.
+
+Поведение больших tool outputs:
+
+- если сериализованный результат тула оценивается больше заданного процента окна контекста, агент сначала отдаёт модели warning вместо полного payload;
+- модель может либо сузить запрос, либо повторить тот же вызов с `force_full_output: true`;
+- на повторе того же вызова полный результат также возвращается без suppress.
+
+Автоматическое сжатие контекста:
+
+- перед очередным запросом к модели PAI оценивает текущий prompt budget;
+- при превышении `agent.auto_compact_percent` выполняется отдельный LLM compaction pass;
+- старый хвост истории заменяется кратким handoff summary, а актуальный хвост текущего диалога сохраняется.
 
 ### 4.4. Шаги (`steps`)
 

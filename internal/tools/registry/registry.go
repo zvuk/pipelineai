@@ -34,6 +34,14 @@ type ExecResult struct {
 	NewWorkdir string `json:"new_workdir,omitempty"`
 	// ToolError — человекочитаемое сообщение об ошибке
 	ToolError string `json:"tool_error,omitempty"`
+	Warning   string `json:"warning,omitempty"`
+	// Suppressed означает, что полный результат не был возвращён модели из-за большого объёма.
+	Suppressed bool `json:"suppressed,omitempty"`
+	// EstimatedTokens — локальная оценка размера suppress'ed payload в токенах.
+	EstimatedTokens int `json:"estimated_tokens,omitempty"`
+	// ThresholdTokens — порог suppress/warn в токенах.
+	ThresholdTokens int    `json:"threshold_tokens,omitempty"`
+	Preview         string `json:"preview,omitempty"`
 }
 
 // Registry — реестр встроенных инструментов и пользовательских функций.
@@ -94,7 +102,7 @@ func (r *Registry) ToolsForAllowed(allowed []string) []llm.Tool {
 					Function: llm.ToolFunctionSpec{
 						Name:        f.Name,
 						Description: f.Description,
-						Parameters:  f.Parameters,
+						Parameters:  withForceFullOutputParam(f.Parameters),
 					},
 				})
 			}
@@ -362,3 +370,32 @@ func requiredKeysFromFunction(f dsl.Function) []string {
 }
 
 func parametersHasRequired(f dsl.Function) bool { _, ok := f.Parameters["required"]; return ok }
+
+func withForceFullOutputParam(params map[string]any) map[string]any {
+	if params == nil {
+		return nil
+	}
+	out := make(map[string]any, len(params))
+	for k, v := range params {
+		out[k] = v
+	}
+
+	props, ok := out["properties"].(map[string]any)
+	if !ok {
+		return out
+	}
+	if _, exists := props["force_full_output"]; exists {
+		return out
+	}
+
+	propsCopy := make(map[string]any, len(props)+1)
+	for k, v := range props {
+		propsCopy[k] = v
+	}
+	propsCopy["force_full_output"] = map[string]any{
+		"type":        "boolean",
+		"description": "When true, return the full tool output even if it is large.",
+	}
+	out["properties"] = propsCopy
+	return out
+}

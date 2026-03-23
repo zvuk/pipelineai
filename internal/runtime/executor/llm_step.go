@@ -80,13 +80,15 @@ func (e *Executor) RunLLMStep(ctx context.Context, stepID string, extra map[stri
 	toolTimeout := e.resolveToolTimeout(&step)
 	// ---
 
-	resp, finalMessages, err := e.runAgentLoop(ctx, req, &step, toolTimeout, shellAppr, applyAppr)
+	profile := e.tokenizer.ResolveModel(e.cfg.Agent.Model, e.cfg.Agent.ModelContextWindow)
+	tokenMetrics := newStepTokenMetrics(e.cfg, profile)
+	resp, finalMessages, err := e.runAgentLoop(ctx, req, &step, toolTimeout, shellAppr, applyAppr, tokenMetrics)
 	if err != nil {
 		return llm.ChatCompletionResponse{}, "", err
 	}
 
 	// Собираем запись артефакта и сохраняем весь конечный диалог messages
-	record, _ := buildLLMArtifactRecord(systemPrompt, userPrompt, resp, finalMessages)
+	record, _ := buildLLMArtifactRecord(systemPrompt, userPrompt, resp, finalMessages, tokenMetrics)
 	path, err := e.artifacts.WriteLLMResponse(stepID, record)
 	if err != nil {
 		return llm.ChatCompletionResponse{}, "", err
@@ -111,13 +113,21 @@ func (e *Executor) RunLLMStep(ctx context.Context, stepID string, extra map[stri
 }
 
 // runAgentLoop управляет итерациями диалога с моделью до финального ответа без tool calls.
-func (e *Executor) runAgentLoop(ctx context.Context, req llm.ChatCompletionRequest, step *dsl.Step, toolTimeout time.Duration, shellAppr *approval.ShellApprover, applyAppr *approval.ApplyPatchApprover) (llm.ChatCompletionResponse, []llm.Message, error) {
+func (e *Executor) runAgentLoop(ctx context.Context, req llm.ChatCompletionRequest, step *dsl.Step, toolTimeout time.Duration, shellAppr *approval.ShellApprover, applyAppr *approval.ApplyPatchApprover, tokenMetrics *stepTokenMetrics) (llm.ChatCompletionResponse, []llm.Message, error) {
 	var last llm.ChatCompletionResponse
 	// Защита от зацикливания: храним последние 3 сигнатуры вызова инструмента
 	lastToolSigs := make([]string, 0, 3)
 	// Текущая рабочая директория для инструментов (обновляется shell.cd)
 	currentWorkdir := ""
+	profile := e.tokenizer.ResolveModel(e.cfg.Agent.Model, e.cfg.Agent.ModelContextWindow)
+	tracker := newPromptTokenTracker(e.tokenizer, profile, req)
+	warnedLargeOutputs := make(map[string]struct{})
+	tokenMetrics.syncTracker(tracker)
 	for {
+		if err := e.maybeCompactContext(ctx, &req, step, tracker, tokenMetrics); err != nil {
+			return last, req.Messages, err
+		}
+		tokenMetrics.syncTracker(tracker)
 		// Перед каждым запросом — обновим историю диалога в DEBUG
 		e.updateChatLogIfDebug(ctx, step.ID, req.Messages)
 		// Таймаут/отмена сценария
@@ -132,6 +142,9 @@ func (e *Executor) runAgentLoop(ctx context.Context, req llm.ChatCompletionReque
 			return last, req.Messages, err
 		}
 		last = resp
+		tokenMetrics.recordResponse(resp)
+		tracker.UpdateFromResponse(resp, req)
+		tokenMetrics.syncTracker(tracker)
 		if len(resp.Choices) == 0 {
 			return resp, req.Messages, nil
 		}
@@ -151,10 +164,14 @@ func (e *Executor) runAgentLoop(ctx context.Context, req llm.ChatCompletionReque
 				}
 				if len(lastToolSigs) == 3 && lastToolSigs[0] == lastToolSigs[1] && lastToolSigs[1] == lastToolSigs[2] {
 					// Зафиксируем сообщение ассистента и вернём предупреждение инструментом
-					req.Messages = append(req.Messages, llm.Message{Role: llm.RoleAssistant, Content: choice.Message.Content, ToolCalls: choice.Message.ToolCalls})
+					assistantMsg := llm.Message{Role: llm.RoleAssistant, Content: choice.Message.Content, ToolCalls: choice.Message.ToolCalls}
+					req.Messages = append(req.Messages, assistantMsg)
+					tracker.AppendMessage(assistantMsg)
 					tc := choice.Message.ToolCalls[0]
 					warning := "Tool execution declined: you appear to be looping. Change strategy and continue."
-					req.Messages = append(req.Messages, llm.Message{Role: llm.RoleTool, Content: warning, ToolCallID: tc.ID})
+					toolMsg := llm.Message{Role: llm.RoleTool, Content: warning, ToolCallID: tc.ID}
+					req.Messages = append(req.Messages, toolMsg)
+					tracker.AppendMessage(toolMsg)
 					e.log.WarnContext(ctx, "loop detected: declining tool execution")
 					continue
 				}
@@ -162,19 +179,25 @@ func (e *Executor) runAgentLoop(ctx context.Context, req llm.ChatCompletionReque
 			// Выполняем строго один tool_call за итерацию, чтобы история была:
 			// assistant(tool_calls[1]) -> tool -> (следующая итерация)
 			tc := choice.Message.ToolCalls[0]
+			sanitizedTC, forceFullOutput, largeOutputSig := sanitizeToolCallForExecution(tc)
 			// Сохраняем сообщение ассистента, но с одиночным вызовом
-			req.Messages = append(req.Messages, llm.Message{Role: llm.RoleAssistant, Content: choice.Message.Content, ToolCalls: []llm.ToolCall{tc}})
+			assistantMsg := llm.Message{Role: llm.RoleAssistant, Content: choice.Message.Content, ToolCalls: []llm.ToolCall{sanitizedTC}}
+			req.Messages = append(req.Messages, assistantMsg)
+			tracker.AppendMessage(assistantMsg)
 			// INFO: вызов инструмента (имя, параметры обрезанные)
-			argsShort := crop(strings.TrimSpace(tc.Function.Arguments), 90)
-			e.log.InfoContext(ctx, "tool call", slog.String("step", step.ID), slog.String("tool", tc.Function.Name), slog.String("args", argsShort))
-			out := e.tools.ExecCall(ctx, tc, step.LLM.ToolsAllowed, currentWorkdir, toolTimeout, shellAppr, applyAppr)
+			argsShort := crop(strings.TrimSpace(sanitizedTC.Function.Arguments), 90)
+			e.log.InfoContext(ctx, "tool call", slog.String("step", step.ID), slog.String("tool", sanitizedTC.Function.Name), slog.String("args", argsShort))
+			out := e.tools.ExecCall(ctx, sanitizedTC, step.LLM.ToolsAllowed, currentWorkdir, toolTimeout, shellAppr, applyAppr)
 			if out.NewWorkdir != "" {
 				currentWorkdir = out.NewWorkdir
 			}
+			out = e.applyToolOutputPolicy(step.ID, sanitizedTC, out, forceFullOutput, largeOutputSig, warnedLargeOutputs, tokenMetrics)
 			// Ответ инструмента
 			payload, _ := json.Marshal(out)
-			req.Messages = append(req.Messages, llm.Message{Role: llm.RoleTool, Content: string(payload), ToolCallID: tc.ID})
-			e.logToolExecution(ctx, step.ID, tc.Function.Name, tc.Function.Arguments, out.Ok, out.ToolError, out.ExitCode, out.Stderr, out.Stdout)
+			toolMsg := llm.Message{Role: llm.RoleTool, Content: string(payload), ToolCallID: sanitizedTC.ID}
+			req.Messages = append(req.Messages, toolMsg)
+			tracker.AppendMessage(toolMsg)
+			e.logToolExecution(ctx, step.ID, sanitizedTC.Function.Name, sanitizedTC.Function.Arguments, out.Ok, out.ToolError, out.ExitCode, out.Stderr, out.Stdout)
 			// После одного инструмента — возвращаемся в начало цикла для нового запроса
 			continue
 		case choice.Message.FunctionCall != nil:
@@ -186,45 +209,65 @@ func (e *Executor) runAgentLoop(ctx context.Context, req llm.ChatCompletionReque
 					lastToolSigs = lastToolSigs[len(lastToolSigs)-3:]
 				}
 				if len(lastToolSigs) == 3 && lastToolSigs[0] == lastToolSigs[1] && lastToolSigs[1] == lastToolSigs[2] {
-					req.Messages = append(req.Messages, llm.Message{Role: llm.RoleAssistant, Content: choice.Message.Content, FunctionCall: choice.Message.FunctionCall})
+					assistantMsg := llm.Message{Role: llm.RoleAssistant, Content: choice.Message.Content, FunctionCall: choice.Message.FunctionCall}
+					req.Messages = append(req.Messages, assistantMsg)
+					tracker.AppendMessage(assistantMsg)
 					warning := "Tool execution declined: you appear to be looping. Change strategy and continue."
-					req.Messages = append(req.Messages, llm.Message{Role: llm.RoleTool, Content: warning, ToolCallID: "fc_0"})
+					toolMsg := llm.Message{Role: llm.RoleTool, Content: warning, ToolCallID: "fc_0"}
+					req.Messages = append(req.Messages, toolMsg)
+					tracker.AppendMessage(toolMsg)
 					e.log.WarnContext(ctx, "loop detected: declining legacy function_call execution")
 					continue
 				}
 			}
-			req.Messages = append(req.Messages, llm.Message{Role: llm.RoleAssistant, Content: choice.Message.Content, FunctionCall: choice.Message.FunctionCall})
-			// Выполним вызов
 			tc := llm.ToolCall{ID: "fc_0", Type: "function", Function: *choice.Message.FunctionCall}
-			argsShort := crop(strings.TrimSpace(tc.Function.Arguments), 90)
-			e.log.InfoContext(ctx, "tool call", slog.String("step", step.ID), slog.String("tool", tc.Function.Name), slog.String("args", argsShort))
-			out := e.tools.ExecCall(ctx, tc, step.LLM.ToolsAllowed, currentWorkdir, toolTimeout, shellAppr, applyAppr)
+			sanitizedTC, forceFullOutput, largeOutputSig := sanitizeToolCallForExecution(tc)
+			fnCall := &llm.FunctionCall{Name: sanitizedTC.Function.Name, Arguments: sanitizedTC.Function.Arguments}
+			assistantMsg := llm.Message{Role: llm.RoleAssistant, Content: choice.Message.Content, FunctionCall: fnCall}
+			req.Messages = append(req.Messages, assistantMsg)
+			tracker.AppendMessage(assistantMsg)
+			// Выполним вызов
+			argsShort := crop(strings.TrimSpace(sanitizedTC.Function.Arguments), 90)
+			e.log.InfoContext(ctx, "tool call", slog.String("step", step.ID), slog.String("tool", sanitizedTC.Function.Name), slog.String("args", argsShort))
+			out := e.tools.ExecCall(ctx, sanitizedTC, step.LLM.ToolsAllowed, currentWorkdir, toolTimeout, shellAppr, applyAppr)
 			if out.NewWorkdir != "" {
 				currentWorkdir = out.NewWorkdir
 			}
+			out = e.applyToolOutputPolicy(step.ID, sanitizedTC, out, forceFullOutput, largeOutputSig, warnedLargeOutputs, tokenMetrics)
 			payload, _ := json.Marshal(out)
-			req.Messages = append(req.Messages, llm.Message{Role: llm.RoleTool, Content: string(payload), ToolCallID: "fc_0"})
-			e.logToolExecution(ctx, step.ID, tc.Function.Name, tc.Function.Arguments, out.Ok, out.ToolError, out.ExitCode, out.Stderr, out.Stdout)
+			toolMsg := llm.Message{Role: llm.RoleTool, Content: string(payload), ToolCallID: "fc_0"}
+			req.Messages = append(req.Messages, toolMsg)
+			tracker.AppendMessage(toolMsg)
+			e.logToolExecution(ctx, step.ID, sanitizedTC.Function.Name, sanitizedTC.Function.Arguments, out.Ok, out.ToolError, out.ExitCode, out.Stderr, out.Stdout)
 			continue
 		default:
 			// Попытка распознать inline-вызов инструмента в content (fallback для моделей без tool_calls)
 			if name, args := tryExtractInlineToolCall(choice.Message.Content); name != "" {
-				req.Messages = append(req.Messages, llm.Message{Role: llm.RoleAssistant, Content: choice.Message.Content})
+				assistantMsg := llm.Message{Role: llm.RoleAssistant, Content: choice.Message.Content}
+				req.Messages = append(req.Messages, assistantMsg)
+				tracker.AppendMessage(assistantMsg)
 				tc := llm.ToolCall{ID: "inline_0", Type: "function", Function: llm.FunctionCall{Name: name, Arguments: args}}
-				argsShort := crop(strings.TrimSpace(args), 90)
-				e.log.InfoContext(ctx, "tool call", slog.String("step", step.ID), slog.String("tool", name), slog.String("args", argsShort))
-				out := e.tools.ExecCall(ctx, tc, step.LLM.ToolsAllowed, currentWorkdir, toolTimeout, shellAppr, applyAppr)
+				sanitizedTC, forceFullOutput, largeOutputSig := sanitizeToolCallForExecution(tc)
+				argsShort := crop(strings.TrimSpace(sanitizedTC.Function.Arguments), 90)
+				e.log.InfoContext(ctx, "tool call", slog.String("step", step.ID), slog.String("tool", sanitizedTC.Function.Name), slog.String("args", argsShort))
+				out := e.tools.ExecCall(ctx, sanitizedTC, step.LLM.ToolsAllowed, currentWorkdir, toolTimeout, shellAppr, applyAppr)
 				if out.NewWorkdir != "" {
 					currentWorkdir = out.NewWorkdir
 				}
+				out = e.applyToolOutputPolicy(step.ID, sanitizedTC, out, forceFullOutput, largeOutputSig, warnedLargeOutputs, tokenMetrics)
 				payload, _ := json.Marshal(out)
-				req.Messages = append(req.Messages, llm.Message{Role: llm.RoleTool, Content: string(payload), ToolCallID: tc.ID})
+				toolMsg := llm.Message{Role: llm.RoleTool, Content: string(payload), ToolCallID: sanitizedTC.ID}
+				req.Messages = append(req.Messages, toolMsg)
+				tracker.AppendMessage(toolMsg)
 				// Продолжим диалог
-				e.logToolExecution(ctx, step.ID, name, args, out.Ok, out.ToolError, out.ExitCode, out.Stderr, out.Stdout)
+				e.logToolExecution(ctx, step.ID, sanitizedTC.Function.Name, sanitizedTC.Function.Arguments, out.Ok, out.ToolError, out.ExitCode, out.Stderr, out.Stdout)
 				continue
 			}
 			// Финальный ответ (нет вызовов tool/function) — сохраняем ответ ассистента
-			req.Messages = append(req.Messages, llm.Message{Role: llm.RoleAssistant, Content: choice.Message.Content})
+			assistantMsg := llm.Message{Role: llm.RoleAssistant, Content: choice.Message.Content}
+			req.Messages = append(req.Messages, assistantMsg)
+			tracker.AppendMessage(assistantMsg)
+			tokenMetrics.syncTracker(tracker)
 			// Обновим историю диалога непосредственно перед завершением (DEBUG)
 			e.updateChatLogIfDebug(ctx, step.ID, req.Messages)
 			return resp, req.Messages, nil

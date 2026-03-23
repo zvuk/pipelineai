@@ -23,6 +23,16 @@ type Agent struct {
 	OpenAI      AgentOpenAI `yaml:"openai"`
 	// Reasoning включает передачу и сохранение reasoning, если модель возвращает его (по умолчанию false)
 	Reasoning bool `yaml:"reasoning,omitempty"`
+	// ModelContextWindow переопределяет размер контекстного окна модели в токенах.
+	ModelContextWindow *int `yaml:"model_context_window,omitempty"`
+	// ToolOutputWarnPercent задаёт порог предупреждения о слишком большом результате тула.
+	// По умолчанию используется 10% контекстного окна модели.
+	ToolOutputWarnPercent *int `yaml:"tool_output_warn_percent,omitempty"`
+	// AutoCompactPercent задаёт порог автоматического сжатия контекста.
+	// По умолчанию используется 85% контекстного окна модели.
+	AutoCompactPercent *int `yaml:"auto_compact_percent,omitempty"`
+	// TokenizerCacheDir указывает каталог для кэша model-specific tokenizer.json.
+	TokenizerCacheDir string `yaml:"tokenizer_cache_dir,omitempty"`
 }
 
 // AgentOpenAI описывает параметры подключения к OpenAI-совместимому API.

@@ -3,6 +3,7 @@ FROM --platform=linux/amd64 golang:1.25.1-bookworm AS build
 
 ENV GO111MODULE=on
 ARG GOPROXY="https://proxy.golang.org,direct"
+ARG TOKENIZERS_LIB_VERSION="1.26.0"
 RUN go env -w GOPROXY=${GOPROXY}
 
 ENV SRC_VERSION=1.0.4
@@ -12,8 +13,12 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -trimpath -ldflags="-s -w" -o /out/pipelineai ./cmd/pipelineai
+RUN mkdir -p /opt/tokenizers && \
+    curl -fsSL "https://github.com/daulet/tokenizers/releases/download/v${TOKENIZERS_LIB_VERSION}/libtokenizers.linux-amd64.tar.gz" -o /tmp/libtokenizers.tar.gz && \
+    tar -xzf /tmp/libtokenizers.tar.gz -C /opt/tokenizers && \
+    rm -f /tmp/libtokenizers.tar.gz
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 CGO_LDFLAGS="-L/opt/tokenizers" \
+    go build -tags tokenizers_hf -trimpath -ldflags="-s -w" -o /out/pipelineai ./cmd/pipelineai
 
 # --- Runtime stage -----------------------------------------------------------
 FROM build AS pai

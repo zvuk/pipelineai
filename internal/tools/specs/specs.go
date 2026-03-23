@@ -22,6 +22,10 @@ func ShellToolSpec() llm.Tool {
 				"type":        "number",
 				"description": "The timeout for the command in milliseconds",
 			},
+			"force_full_output": map[string]any{
+				"type":        "boolean",
+				"description": "When true, return the full tool output even if it is large.",
+			},
 		},
 		"required":              []string{"command"},
 		"additional_properties": false,
@@ -45,6 +49,10 @@ func ApplyPatchToolSpecJSON() llm.Tool {
 			"input": map[string]any{
 				"type":        "string",
 				"description": "The entire contents of the apply_patch command",
+			},
+			"force_full_output": map[string]any{
+				"type":        "boolean",
+				"description": "When true, return the full tool output even if it is large.",
 			},
 		},
 		"required":              []string{"input"},

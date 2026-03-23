@@ -27,6 +27,24 @@ func Validate(cfg *Config) error {
 	if strings.TrimSpace(cfg.Agent.ArtifactDir) == "" {
 		problems = append(problems, "agent.artifact_dir is required")
 	}
+	if cfg.Agent.ModelContextWindow != nil && *cfg.Agent.ModelContextWindow <= 0 {
+		problems = append(problems, "agent.model_context_window must be > 0")
+	}
+	if cfg.Agent.ToolOutputWarnPercent != nil {
+		if *cfg.Agent.ToolOutputWarnPercent <= 0 || *cfg.Agent.ToolOutputWarnPercent > 100 {
+			problems = append(problems, "agent.tool_output_warn_percent must be within 1..100")
+		}
+	}
+	if cfg.Agent.AutoCompactPercent != nil {
+		if *cfg.Agent.AutoCompactPercent <= 0 || *cfg.Agent.AutoCompactPercent > 100 {
+			problems = append(problems, "agent.auto_compact_percent must be within 1..100")
+		}
+	}
+	if cfg.Agent.ToolOutputWarnPercent != nil && cfg.Agent.AutoCompactPercent != nil {
+		if *cfg.Agent.ToolOutputWarnPercent >= *cfg.Agent.AutoCompactPercent {
+			problems = append(problems, "agent.tool_output_warn_percent must be less than agent.auto_compact_percent")
+		}
+	}
 
 	if len(cfg.Steps) == 0 {
 		problems = append(problems, "no steps defined")

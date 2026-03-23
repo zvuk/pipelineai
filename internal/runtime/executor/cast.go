@@ -10,7 +10,7 @@ import (
 )
 
 // buildLLMArtifactRecord формирует полезную нагрузку артефакта и вычисляет хэш для дедупликации.
-func buildLLMArtifactRecord(system, prompt string, resp llm.ChatCompletionResponse, messages []llm.Message) (map[string]any, string) {
+func buildLLMArtifactRecord(system, prompt string, resp llm.ChatCompletionResponse, messages []llm.Message, metrics *stepTokenMetrics) (map[string]any, string) {
 	// Хэш считаем от структурированного набора полей
 	hw := struct {
 		System   string                     `json:"system"`
@@ -33,6 +33,9 @@ func buildLLMArtifactRecord(system, prompt string, resp llm.ChatCompletionRespon
 			"requested_at": time.Now().UTC().Format(time.RFC3339Nano),
 			"hash":         hash,
 		},
+	}
+	if metrics != nil {
+		rec["token_metrics"] = metrics
 	}
 	return rec, hash
 }

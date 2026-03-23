@@ -20,6 +20,10 @@ CONFIG ?= docs/examples/configs/minimal-llm.yaml
 STEP ?= produce_manifest
 ARTIFACT_DIR ?= .agent/artifacts
 RUN_FLAGS ?=
+TOKENIZERS_LIB_VERSION ?= 1.26.0
+TOKENIZERS_LIB_DIR_CMD = TOKENIZERS_LIB_VERSION="$(TOKENIZERS_LIB_VERSION)" ./scripts/ensure-tokenizers-lib.sh
+BUILD_GOFLAGS = GO111MODULE=on CGO_ENABLED=1 CGO_LDFLAGS="-L$$($(TOKENIZERS_LIB_DIR_CMD))"
+BUILD_GOTAGS = -tags tokenizers_hf
 
 .PHONY: help
 help: ## Выводит доступные цели make
@@ -41,7 +45,7 @@ init: ## Создаёт .env из .tpl.env, если файла ещё нет
 .PHONY: build
 build: ## Собирает бинарь pipelineai в каталоге ./bin
 	@mkdir -p $(BIN_DIR)
-	GO111MODULE=on go build -o $(BINARY) ./cmd/pipelineai
+	$(BUILD_GOFLAGS) go build $(BUILD_GOTAGS) -o $(BINARY) ./cmd/pipelineai
 
 .PHONY: run-smoke
 run-smoke: build ## Запускает smoke-команду llm-smoke (MESSAGE и SYSTEM можно переопределить)
@@ -88,4 +92,4 @@ run-smoke-matrix: build ## Запускает smoke конфиг matrix (docs/ex
 
 .PHONY: test
 test: ## Запускает go test ./...
-	go test ./...
+	$(BUILD_GOFLAGS) go test $(BUILD_GOTAGS) ./...
