@@ -106,6 +106,36 @@ func (m *Manager) WriteLLMResponse(stepID string, payload any) (string, error) {
 	return path, nil
 }
 
+// WriteToolPayload сохраняет полный payload инструмента в каталоге tools/<step-id>/<ts>-<tool>.json.
+func (m *Manager) WriteToolPayload(stepID string, toolName string, payload any) (string, error) {
+	if strings.TrimSpace(stepID) == "" {
+		return "", fmt.Errorf("artifacts: stepID must not be empty")
+	}
+	if strings.TrimSpace(toolName) == "" {
+		toolName = "tool"
+	}
+	safeToolName := sanitizeArtifactName(toolName)
+	dir := filepath.Join(m.root, "tools", stepID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("artifacts: failed to create directory %s: %w", dir, err)
+	}
+
+	ts := time.Now().UTC().Format("20060102T150405.000000000Z")
+	path := filepath.Join(dir, fmt.Sprintf("%s-%s.json", ts, safeToolName))
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("artifacts: failed to open file %s: %w", path, err)
+	}
+	defer file.Close()
+
+	enc := json.NewEncoder(file)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(payload); err != nil {
+		return "", fmt.Errorf("artifacts: failed to write json to %s: %w", path, err)
+	}
+	return path, nil
+}
+
 // latestLLMArtifact возвращает путь и meta.hash последнего по имени JSON файла в каталоге шага.
 func latestLLMArtifact(dir string) (string, string, error) {
 	entries, err := os.ReadDir(dir)
@@ -143,4 +173,31 @@ func latestLLMArtifact(dir string) (string, string, error) {
 		}
 	}
 	return path, "", nil
+}
+
+func sanitizeArtifactName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "tool"
+	}
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "tool"
+	}
+	return out
 }

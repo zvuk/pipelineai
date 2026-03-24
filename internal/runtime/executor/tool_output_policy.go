@@ -51,7 +51,7 @@ func (e *Executor) applyToolOutputPolicy(
 	warned map[string]struct{},
 	metrics *stepTokenMetrics,
 ) registry.ExecResult {
-	if metrics == nil || metrics.ToolWarnThreshold <= 0 {
+	if metrics == nil {
 		return out
 	}
 
@@ -60,25 +60,62 @@ func (e *Executor) applyToolOutputPolicy(
 		return out
 	}
 	estimate := e.tokenizer.CountText(e.cfg.Agent.Model, e.cfg.Agent.ModelContextWindow, string(payload))
-	if estimate.Tokens < metrics.ToolWarnThreshold {
+	hardCapExceeded := metrics.ToolHardCapThreshold > 0 && estimate.Tokens >= metrics.ToolHardCapThreshold
+	warnThresholdExceeded := metrics.ToolWarnThreshold > 0 && estimate.Tokens >= metrics.ToolWarnThreshold
+	if !hardCapExceeded && !warnThresholdExceeded {
 		return out
 	}
+
+	artifactPath := ""
+	if e.artifacts != nil {
+		if path, err := e.artifacts.WriteToolPayload(stepID, tc.Function.Name, out); err == nil {
+			artifactPath = path
+		}
+	}
+
+	if hardCapExceeded {
+		metrics.ToolHardCapSuppressions++
+		return suppressedToolResult(
+			out,
+			estimate.Tokens,
+			metrics.ToolHardCapThreshold,
+			"The full payload was stored outside of the dialog because it exceeds the hard context cap. Narrow the request or inspect artifact_path via shell. force_full_output=true is ignored for this tool result.",
+			artifactPath,
+			true,
+		)
+	}
+
 	if forceFullOutput {
 		return out
 	}
-	if _, seen := warned[signature]; seen {
-		return out
+	if _, seen := warned[signature]; !seen {
+		warned[signature] = struct{}{}
+		metrics.ToolWarnings++
 	}
-
-	warned[signature] = struct{}{}
-	metrics.ToolWarnings++
-
-	warning := fmt.Sprintf(
-		"Tool output was suppressed because it is too large for the current context budget: estimated %d tokens, threshold %d tokens. Narrow the request or repeat the same call with force_full_output=true to receive the complete payload.",
+	return suppressedToolResult(
+		out,
 		estimate.Tokens,
 		metrics.ToolWarnThreshold,
+		"Repeat the call with force_full_output=true only if the complete payload is strictly needed in context. The full payload was also stored in artifact_path for inspection outside the dialog.",
+		artifactPath,
+		false,
 	)
+}
 
+func suppressedToolResult(
+	out registry.ExecResult,
+	estimatedTokens int,
+	thresholdTokens int,
+	hint string,
+	artifactPath string,
+	hardSuppressed bool,
+) registry.ExecResult {
+	warning := fmt.Sprintf(
+		"Tool output was suppressed because it is too large for the current context budget: estimated %d tokens, threshold %d tokens. %s",
+		estimatedTokens,
+		thresholdTokens,
+		strings.TrimSpace(hint),
+	)
 	return registry.ExecResult{
 		Tool:            out.Tool,
 		Ok:              out.Ok,
@@ -94,9 +131,11 @@ func (e *Executor) applyToolOutputPolicy(
 		ToolError:       out.ToolError,
 		Warning:         warning,
 		Suppressed:      true,
-		EstimatedTokens: estimate.Tokens,
-		ThresholdTokens: metrics.ToolWarnThreshold,
+		HardSuppressed:  hardSuppressed,
+		EstimatedTokens: estimatedTokens,
+		ThresholdTokens: thresholdTokens,
 		Preview:         buildToolResultPreview(out),
+		ArtifactPath:    artifactPath,
 	}
 }
 

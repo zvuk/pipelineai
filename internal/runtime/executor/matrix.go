@@ -147,6 +147,8 @@ func (e *Executor) RunMatrixStep(ctx context.Context, stepID string, parallel in
 				"started_at":  started.Format(time.RFC3339Nano),
 				"attempts":    childAttempts,
 				"allow_fail":  childAllowFailure,
+				"status":      "running",
+				"degraded":    false,
 				"ok":          false,
 				"error":       "",
 				"finished_at": "",
@@ -170,6 +172,7 @@ func (e *Executor) RunMatrixStep(ctx context.Context, stepID string, parallel in
 
 				if lastErr == nil {
 					status["ok"] = true
+					status["status"] = "ok"
 					break
 				}
 
@@ -201,6 +204,7 @@ func (e *Executor) RunMatrixStep(ctx context.Context, stepID string, parallel in
 			finished := time.Now().UTC()
 			if lastErr == nil {
 				status["ok"] = true
+				status["status"] = "ok"
 			} else {
 				finalFailAttrs := []any{
 					slog.String("step", stepID),
@@ -212,9 +216,12 @@ func (e *Executor) RunMatrixStep(ctx context.Context, stepID string, parallel in
 				// Все попытки исчерпаны
 				if childAllowFailure {
 					e.log.Error("matrix item failed after retries, allowed to fail", finalFailAttrs...)
+					status["status"] = "degraded"
+					status["degraded"] = true
 					// Не пробрасываем ошибку наверх, сценарий продолжает выполнение.
 				} else {
 					e.log.Error("matrix item failed after retries", finalFailAttrs...)
+					status["status"] = "failed"
 					errs <- lastErr
 				}
 			}

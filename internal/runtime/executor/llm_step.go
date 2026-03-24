@@ -84,6 +84,13 @@ func (e *Executor) RunLLMStep(ctx context.Context, stepID string, extra map[stri
 	tokenMetrics := newStepTokenMetrics(e.cfg, profile)
 	resp, finalMessages, err := e.runAgentLoop(ctx, req, &step, toolTimeout, shellAppr, applyAppr, tokenMetrics)
 	if err != nil {
+		record, _ := buildLLMErrorArtifactRecord(systemPrompt, userPrompt, resp, finalMessages, tokenMetrics, err)
+		_, _ = e.artifacts.WriteLLMResponse(stepID, record)
+		return llm.ChatCompletionResponse{}, "", err
+	}
+	if err := validateLLMFinalResponse(normalizedValidatorName(&step), resp, finalMessages, extra); err != nil {
+		record, _ := buildLLMErrorArtifactRecord(systemPrompt, userPrompt, resp, finalMessages, tokenMetrics, err)
+		_, _ = e.artifacts.WriteLLMResponse(stepID, record)
 		return llm.ChatCompletionResponse{}, "", err
 	}
 
@@ -124,10 +131,17 @@ func (e *Executor) runAgentLoop(ctx context.Context, req llm.ChatCompletionReque
 	warnedLargeOutputs := make(map[string]struct{})
 	tokenMetrics.syncTracker(tracker)
 	for {
+		if err := enforceLLMLimits(step, tokenMetrics); err != nil {
+			tokenMetrics.recordBudgetExceeded(err.Error())
+			return last, req.Messages, err
+		}
 		if err := e.maybeCompactContext(ctx, &req, step, tracker, tokenMetrics); err != nil {
 			return last, req.Messages, err
 		}
 		tokenMetrics.syncTracker(tracker)
+		if err := e.enforceStepBudgetBeforeRequest(step, req, tracker, tokenMetrics); err != nil {
+			return last, req.Messages, err
+		}
 		// Перед каждым запросом — обновим историю диалога в DEBUG
 		e.updateChatLogIfDebug(ctx, step.ID, req.Messages)
 		// Таймаут/отмена сценария
@@ -137,12 +151,14 @@ func (e *Executor) runAgentLoop(ctx context.Context, req llm.ChatCompletionReque
 		default:
 		}
 
+		predictedPromptTokens := tracker.EstimatedNextPromptTokens()
 		resp, err := e.client.CreateChatCompletion(ctx, req)
 		if err != nil {
+			tokenMetrics.recordBudgetExceeded(err.Error())
 			return last, req.Messages, err
 		}
 		last = resp
-		tokenMetrics.recordResponse(resp)
+		tokenMetrics.recordResponse(resp, predictedPromptTokens)
 		tracker.UpdateFromResponse(resp, req)
 		tokenMetrics.syncTracker(tracker)
 		if len(resp.Choices) == 0 {
@@ -171,10 +187,14 @@ func (e *Executor) runAgentLoop(ctx context.Context, req llm.ChatCompletionReque
 					warning := "Tool execution declined: you appear to be looping. Change strategy and continue."
 					toolMsg := llm.Message{Role: llm.RoleTool, Content: warning, ToolCallID: tc.ID}
 					req.Messages = append(req.Messages, toolMsg)
-					tracker.AppendMessage(toolMsg)
+					tokenMetrics.recordToolMessageTokens(tracker.AppendMessage(toolMsg))
 					e.log.WarnContext(ctx, "loop detected: declining tool execution")
 					continue
 				}
+			}
+			if err := enforceToolCallLimit(step, tokenMetrics); err != nil {
+				tokenMetrics.recordBudgetExceeded(err.Error())
+				return last, req.Messages, err
 			}
 			// Выполняем строго один tool_call за итерацию, чтобы история была:
 			// assistant(tool_calls[1]) -> tool -> (следующая итерация)
@@ -192,11 +212,16 @@ func (e *Executor) runAgentLoop(ctx context.Context, req llm.ChatCompletionReque
 				currentWorkdir = out.NewWorkdir
 			}
 			out = e.applyToolOutputPolicy(step.ID, sanitizedTC, out, forceFullOutput, largeOutputSig, warnedLargeOutputs, tokenMetrics)
+			tokenMetrics.ToolCalls++
 			// Ответ инструмента
 			payload, _ := json.Marshal(out)
 			toolMsg := llm.Message{Role: llm.RoleTool, Content: string(payload), ToolCallID: sanitizedTC.ID}
 			req.Messages = append(req.Messages, toolMsg)
-			tracker.AppendMessage(toolMsg)
+			tokenMetrics.recordToolMessageTokens(tracker.AppendMessage(toolMsg))
+			if err := enforceLLMLimits(step, tokenMetrics); err != nil {
+				tokenMetrics.recordBudgetExceeded(err.Error())
+				return last, req.Messages, err
+			}
 			e.logToolExecution(ctx, step.ID, sanitizedTC.Function.Name, sanitizedTC.Function.Arguments, out.Ok, out.ToolError, out.ExitCode, out.Stderr, out.Stdout)
 			// После одного инструмента — возвращаемся в начало цикла для нового запроса
 			continue
@@ -215,10 +240,14 @@ func (e *Executor) runAgentLoop(ctx context.Context, req llm.ChatCompletionReque
 					warning := "Tool execution declined: you appear to be looping. Change strategy and continue."
 					toolMsg := llm.Message{Role: llm.RoleTool, Content: warning, ToolCallID: "fc_0"}
 					req.Messages = append(req.Messages, toolMsg)
-					tracker.AppendMessage(toolMsg)
+					tokenMetrics.recordToolMessageTokens(tracker.AppendMessage(toolMsg))
 					e.log.WarnContext(ctx, "loop detected: declining legacy function_call execution")
 					continue
 				}
+			}
+			if err := enforceToolCallLimit(step, tokenMetrics); err != nil {
+				tokenMetrics.recordBudgetExceeded(err.Error())
+				return last, req.Messages, err
 			}
 			tc := llm.ToolCall{ID: "fc_0", Type: "function", Function: *choice.Message.FunctionCall}
 			sanitizedTC, forceFullOutput, largeOutputSig := sanitizeToolCallForExecution(tc)
@@ -234,10 +263,15 @@ func (e *Executor) runAgentLoop(ctx context.Context, req llm.ChatCompletionReque
 				currentWorkdir = out.NewWorkdir
 			}
 			out = e.applyToolOutputPolicy(step.ID, sanitizedTC, out, forceFullOutput, largeOutputSig, warnedLargeOutputs, tokenMetrics)
+			tokenMetrics.ToolCalls++
 			payload, _ := json.Marshal(out)
 			toolMsg := llm.Message{Role: llm.RoleTool, Content: string(payload), ToolCallID: "fc_0"}
 			req.Messages = append(req.Messages, toolMsg)
-			tracker.AppendMessage(toolMsg)
+			tokenMetrics.recordToolMessageTokens(tracker.AppendMessage(toolMsg))
+			if err := enforceLLMLimits(step, tokenMetrics); err != nil {
+				tokenMetrics.recordBudgetExceeded(err.Error())
+				return last, req.Messages, err
+			}
 			e.logToolExecution(ctx, step.ID, sanitizedTC.Function.Name, sanitizedTC.Function.Arguments, out.Ok, out.ToolError, out.ExitCode, out.Stderr, out.Stdout)
 			continue
 		default:
@@ -247,6 +281,10 @@ func (e *Executor) runAgentLoop(ctx context.Context, req llm.ChatCompletionReque
 				req.Messages = append(req.Messages, assistantMsg)
 				tracker.AppendMessage(assistantMsg)
 				tc := llm.ToolCall{ID: "inline_0", Type: "function", Function: llm.FunctionCall{Name: name, Arguments: args}}
+				if err := enforceToolCallLimit(step, tokenMetrics); err != nil {
+					tokenMetrics.recordBudgetExceeded(err.Error())
+					return last, req.Messages, err
+				}
 				sanitizedTC, forceFullOutput, largeOutputSig := sanitizeToolCallForExecution(tc)
 				argsShort := crop(strings.TrimSpace(sanitizedTC.Function.Arguments), 90)
 				e.log.InfoContext(ctx, "tool call", slog.String("step", step.ID), slog.String("tool", sanitizedTC.Function.Name), slog.String("args", argsShort))
@@ -255,10 +293,15 @@ func (e *Executor) runAgentLoop(ctx context.Context, req llm.ChatCompletionReque
 					currentWorkdir = out.NewWorkdir
 				}
 				out = e.applyToolOutputPolicy(step.ID, sanitizedTC, out, forceFullOutput, largeOutputSig, warnedLargeOutputs, tokenMetrics)
+				tokenMetrics.ToolCalls++
 				payload, _ := json.Marshal(out)
 				toolMsg := llm.Message{Role: llm.RoleTool, Content: string(payload), ToolCallID: sanitizedTC.ID}
 				req.Messages = append(req.Messages, toolMsg)
-				tracker.AppendMessage(toolMsg)
+				tokenMetrics.recordToolMessageTokens(tracker.AppendMessage(toolMsg))
+				if err := enforceLLMLimits(step, tokenMetrics); err != nil {
+					tokenMetrics.recordBudgetExceeded(err.Error())
+					return last, req.Messages, err
+				}
 				// Продолжим диалог
 				e.logToolExecution(ctx, step.ID, sanitizedTC.Function.Name, sanitizedTC.Function.Arguments, out.Ok, out.ToolError, out.ExitCode, out.Stderr, out.Stdout)
 				continue

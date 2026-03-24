@@ -35,14 +35,37 @@ func Validate(cfg *Config) error {
 			problems = append(problems, "agent.tool_output_warn_percent must be within 1..100")
 		}
 	}
+	if cfg.Agent.ToolOutputHardCapPercent != nil {
+		if *cfg.Agent.ToolOutputHardCapPercent <= 0 || *cfg.Agent.ToolOutputHardCapPercent > 100 {
+			problems = append(problems, "agent.tool_output_hard_cap_percent must be within 1..100")
+		}
+	}
 	if cfg.Agent.AutoCompactPercent != nil {
 		if *cfg.Agent.AutoCompactPercent <= 0 || *cfg.Agent.AutoCompactPercent > 100 {
 			problems = append(problems, "agent.auto_compact_percent must be within 1..100")
 		}
 	}
+	if cfg.Agent.CompactTargetPercent != nil {
+		if *cfg.Agent.CompactTargetPercent <= 0 || *cfg.Agent.CompactTargetPercent > 100 {
+			problems = append(problems, "agent.compact_target_percent must be within 1..100")
+		}
+	}
+	if cfg.Agent.ResponseReserveTokens != nil && *cfg.Agent.ResponseReserveTokens <= 0 {
+		problems = append(problems, "agent.response_reserve_tokens must be > 0")
+	}
 	if cfg.Agent.ToolOutputWarnPercent != nil && cfg.Agent.AutoCompactPercent != nil {
 		if *cfg.Agent.ToolOutputWarnPercent >= *cfg.Agent.AutoCompactPercent {
 			problems = append(problems, "agent.tool_output_warn_percent must be less than agent.auto_compact_percent")
+		}
+	}
+	if cfg.Agent.ToolOutputWarnPercent != nil && cfg.Agent.ToolOutputHardCapPercent != nil {
+		if *cfg.Agent.ToolOutputWarnPercent >= *cfg.Agent.ToolOutputHardCapPercent {
+			problems = append(problems, "agent.tool_output_warn_percent must be less than agent.tool_output_hard_cap_percent")
+		}
+	}
+	if cfg.Agent.AutoCompactPercent != nil && cfg.Agent.CompactTargetPercent != nil {
+		if *cfg.Agent.CompactTargetPercent >= *cfg.Agent.AutoCompactPercent {
+			problems = append(problems, "agent.compact_target_percent must be less than agent.auto_compact_percent")
 		}
 	}
 
@@ -76,6 +99,7 @@ func Validate(cfg *Config) error {
 			if step.LLM.UserPrompt.IsZero() && step.LLM.UserPromptPath.IsZero() {
 				problems = append(problems, fmt.Sprintf("%s: user_prompt or user_prompt_path is required", path))
 			}
+			validateLLMPolicy(path, step.LLM, &problems)
 		case "shell":
 			runTpl, ok := bashRunTemplateForStep(step)
 			if !ok {
@@ -198,6 +222,34 @@ func validateBashRunTemplate(path string, stepType string, run TemplateString, p
 	lower := strings.ToLower(runRaw)
 	if strings.HasPrefix(lower, "bash ") || strings.Contains(lower, "bash -lc") {
 		*problems = append(*problems, fmt.Sprintf("%s: %s.run must not include an explicit 'bash -lc' invocation", path, stepType))
+	}
+}
+
+func validateLLMPolicy(path string, llm *StepLLM, problems *[]string) {
+	if llm == nil {
+		return
+	}
+	for _, item := range []struct {
+		name  string
+		value *int
+	}{
+		{name: "max_tokens", value: llm.MaxTokens},
+		{name: "max_requests", value: llm.MaxRequests},
+		{name: "max_tool_calls", value: llm.MaxToolCalls},
+		{name: "max_cumulative_prompt_tokens", value: llm.MaxCumulativePromptTokens},
+		{name: "max_cumulative_total_tokens", value: llm.MaxCumulativeTotalTokens},
+		{name: "max_cumulative_tool_tokens", value: llm.MaxCumulativeToolTokens},
+	} {
+		if item.value != nil && *item.value <= 0 {
+			*problems = append(*problems, fmt.Sprintf("%s.%s must be > 0", path, item.name))
+		}
+	}
+
+	validator := strings.TrimSpace(llm.ResponseValidator)
+	switch validator {
+	case "", "review_file":
+	default:
+		*problems = append(*problems, fmt.Sprintf("%s.response_validator has unsupported value %q", path, llm.ResponseValidator))
 	}
 }
 

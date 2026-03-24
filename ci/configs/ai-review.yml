@@ -3,6 +3,13 @@ version: 1
 agent:
   name: pai-ai-review
   model: '{{ env "LLM_MODEL" "openai/gpt-oss-20b" }}'
+  model_context_window: 131072
+  tool_output_warn_percent: 10
+  tool_output_hard_cap_percent: 25
+  auto_compact_percent: 85
+  compact_target_percent: 60
+  response_reserve_tokens: 4096
+  tokenizer_cache_dir: .agent/cache/tokenizers
   artifact_dir: .agent/artifacts
   openai:
     base_url: '{{ env "LLM_BASE_URL" "http://localhost:1234/v1" }}'
@@ -816,8 +823,14 @@ steps:
     template: true
     name: "AI‑ревью файла {{ .matrix.file_path }}"
     allow_failure: true
-    retries: 3
+    retries: 2
     max_tokens: 100000
+    max_requests: 18
+    max_tool_calls: 10
+    max_cumulative_prompt_tokens: 350000
+    max_cumulative_total_tokens: 450000
+    max_cumulative_tool_tokens: 45000
+    response_validator: review_file
     tools_allowed:
       - shell
       - github_get_file_diff
@@ -840,6 +853,11 @@ steps:
     type: llm
     name: "AI‑summary по всему PR"
     needs: [build_pr_context, review_per_file]
+    max_requests: 8
+    max_tool_calls: 3
+    max_cumulative_prompt_tokens: 280000
+    max_cumulative_total_tokens: 340000
+    max_cumulative_tool_tokens: 25000
     tools_allowed:
       - shell
       - github_get_pr_metadata
@@ -866,6 +884,11 @@ steps:
       - github_get_pending_ai_comments
       - github_post_ai_reply
     max_tokens: 25000
+    max_requests: 10
+    max_tool_calls: 6
+    max_cumulative_prompt_tokens: 180000
+    max_cumulative_total_tokens: 220000
+    max_cumulative_tool_tokens: 16000
     inputs:
       - id: pr_context
         type: file

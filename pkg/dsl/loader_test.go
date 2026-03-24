@@ -26,6 +26,14 @@ agent:
   name: "pipelineai"
   model: "openai/gpt-oss-20b"
   artifact_dir: ".agent/artifacts"
+  model_context_window: 131072
+  tool_output_warn_percent: 10
+  tool_output_hard_cap_percent: 25
+  auto_compact_percent: 85
+  compact_target_percent: 60
+  response_reserve_tokens: 4096
+  tokenizer_cache_dir: ".agent/cache/tokenizers"
+  reasoning: true
   openai:
     base_url: '{{ env "TEST_LLM_BASE_URL" }}'
     api_key_env: '{{ env "TEST_LLM_API_KEY_ENV" }}'
@@ -46,6 +54,30 @@ steps:
 	}
 	if cfg.Agent.OpenAI.APIKeyEnv != "LLM_API_KEY" {
 		t.Fatalf("api_key_env resolved incorrectly: %s", cfg.Agent.OpenAI.APIKeyEnv)
+	}
+	if cfg.Agent.ModelContextWindow == nil || *cfg.Agent.ModelContextWindow != 131072 {
+		t.Fatalf("model_context_window resolved incorrectly: %#v", cfg.Agent.ModelContextWindow)
+	}
+	if cfg.Agent.ToolOutputWarnPercent == nil || *cfg.Agent.ToolOutputWarnPercent != 10 {
+		t.Fatalf("tool_output_warn_percent resolved incorrectly: %#v", cfg.Agent.ToolOutputWarnPercent)
+	}
+	if cfg.Agent.ToolOutputHardCapPercent == nil || *cfg.Agent.ToolOutputHardCapPercent != 25 {
+		t.Fatalf("tool_output_hard_cap_percent resolved incorrectly: %#v", cfg.Agent.ToolOutputHardCapPercent)
+	}
+	if cfg.Agent.AutoCompactPercent == nil || *cfg.Agent.AutoCompactPercent != 85 {
+		t.Fatalf("auto_compact_percent resolved incorrectly: %#v", cfg.Agent.AutoCompactPercent)
+	}
+	if cfg.Agent.CompactTargetPercent == nil || *cfg.Agent.CompactTargetPercent != 60 {
+		t.Fatalf("compact_target_percent resolved incorrectly: %#v", cfg.Agent.CompactTargetPercent)
+	}
+	if cfg.Agent.ResponseReserveTokens == nil || *cfg.Agent.ResponseReserveTokens != 4096 {
+		t.Fatalf("response_reserve_tokens resolved incorrectly: %#v", cfg.Agent.ResponseReserveTokens)
+	}
+	if cfg.Agent.TokenizerCacheDir != ".agent/cache/tokenizers" {
+		t.Fatalf("tokenizer_cache_dir resolved incorrectly: %q", cfg.Agent.TokenizerCacheDir)
+	}
+	if !cfg.Agent.Reasoning {
+		t.Fatal("expected reasoning=true to be preserved")
 	}
 	if len(cfg.Steps) != 1 {
 		t.Fatalf("expected one step, got %d", len(cfg.Steps))

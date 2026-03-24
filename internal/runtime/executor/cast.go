@@ -39,3 +39,15 @@ func buildLLMArtifactRecord(system, prompt string, resp llm.ChatCompletionRespon
 	}
 	return rec, hash
 }
+
+// buildLLMErrorArtifactRecord формирует артефакт неуспешного LLM-шага с диагностикой.
+func buildLLMErrorArtifactRecord(system, prompt string, resp llm.ChatCompletionResponse, messages []llm.Message, metrics *stepTokenMetrics, err error) (map[string]any, string) {
+	rec, hash := buildLLMArtifactRecord(system, prompt, resp, messages, metrics)
+	if err != nil {
+		rec["error"] = err.Error()
+	}
+	if metrics != nil && metrics.BudgetExceededReason == "" && err != nil {
+		metrics.BudgetExceededReason = err.Error()
+	}
+	return rec, hash
+}

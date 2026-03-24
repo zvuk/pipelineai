@@ -42,6 +42,10 @@ type ExecResult struct {
 	// ThresholdTokens — порог suppress/warn в токенах.
 	ThresholdTokens int    `json:"threshold_tokens,omitempty"`
 	Preview         string `json:"preview,omitempty"`
+	// HardSuppressed означает, что даже force-повтор не вернёт полный payload в контекст.
+	HardSuppressed bool `json:"hard_suppressed,omitempty"`
+	// ArtifactPath указывает путь к сохранённому полному payload инструмента.
+	ArtifactPath string `json:"artifact_path,omitempty"`
 }
 
 // Registry — реестр встроенных инструментов и пользовательских функций.
@@ -73,7 +77,14 @@ func New(cfg *dsl.Config) *Registry {
 			"base_url":    a.OpenAI.BaseURL,
 			"api_key_env": a.OpenAI.APIKeyEnv,
 		},
-		"reasoning": a.Reasoning,
+		"reasoning":                    a.Reasoning,
+		"model_context_window":         a.ModelContextWindow,
+		"tool_output_warn_percent":     a.ToolOutputWarnPercent,
+		"tool_output_hard_cap_percent": a.ToolOutputHardCapPercent,
+		"auto_compact_percent":         a.AutoCompactPercent,
+		"compact_target_percent":       a.CompactTargetPercent,
+		"response_reserve_tokens":      a.ResponseReserveTokens,
+		"tokenizer_cache_dir":          a.TokenizerCacheDir,
 	}
 
 	return &Registry{
