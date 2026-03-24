@@ -12,6 +12,13 @@ const (
 	DefaultToolWarnPercent = 10
 	// DefaultAutoCompactPercent задаёт порог автокомпактизации контекста.
 	DefaultAutoCompactPercent = 85
+	// DefaultCompactTargetPercent задаёт целевой размер контекста после compaction.
+	DefaultCompactTargetPercent = 60
+	// DefaultToolHardCapPercent задаёт порог, после которого результат инструмента
+	// больше не возвращается в контекст целиком даже по force-запросу.
+	DefaultToolHardCapPercent = 25
+	// DefaultResponseReserveTokens задаёт минимальный запас токенов под следующий ответ модели.
+	DefaultResponseReserveTokens = 4096
 	// DefaultSafetyMarginPercent задаёт запас для предоценки размера следующего запроса.
 	DefaultSafetyMarginPercent = 15
 )

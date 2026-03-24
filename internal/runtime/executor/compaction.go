@@ -9,6 +9,7 @@ import (
 
 	"github.com/zvuk/pipelineai/internal/runtime/llm"
 	"github.com/zvuk/pipelineai/internal/runtime/tokens"
+	"github.com/zvuk/pipelineai/internal/tools/registry"
 	"github.com/zvuk/pipelineai/pkg/dsl"
 )
 
@@ -37,23 +38,33 @@ func (e *Executor) maybeCompactContext(
 		return nil
 	}
 
+	fitLimit := requestFitLimit(tracker.ContextWindow(), metrics.ResponseReserveTokens)
+	targetLimit := metrics.CompactTargetTokens
+	if targetLimit <= 0 || targetLimit > fitLimit {
+		targetLimit = fitLimit
+	}
+
 	for attempt := 0; attempt < 3; attempt++ {
 		metrics.syncTracker(tracker)
-		if tracker.EstimatedNextPromptTokens() < metrics.AutoCompactThreshold {
+		estimate := tracker.EstimatedNextPromptTokens()
+		if estimate <= fitLimit && estimate < metrics.AutoCompactThreshold {
 			return nil
 		}
 
-		compacted, changed, usage, err := e.compactMessages(ctx, *req, tracker.profile)
+		compacted, changed, usage, err := e.compactMessages(ctx, *req, tracker.profile, targetLimit, fitLimit)
 		if err != nil {
+			metrics.recordBudgetExceeded(err.Error())
 			return err
 		}
 		if !changed {
-			if tracker.EstimatedNextPromptTokens() >= tracker.ContextWindow() {
-				return fmt.Errorf(
-					"executor: estimated prompt %d tokens exceeds model context window %d and there is not enough old history to compact",
-					tracker.EstimatedNextPromptTokens(),
-					tracker.ContextWindow(),
+			if estimate > fitLimit {
+				err := fmt.Errorf(
+					"executor: estimated prompt %d tokens exceeds fit limit %d and there is not enough history left to compact safely",
+					estimate,
+					fitLimit,
 				)
+				metrics.recordBudgetExceeded(err.Error())
+				return err
 			}
 			return nil
 		}
@@ -61,13 +72,30 @@ func (e *Executor) maybeCompactContext(
 		req.Messages = compacted
 		tracker.ResetToRequest(*req)
 		metrics.Compactions++
-		metrics.recordResponse(llm.ChatCompletionResponse{Usage: usage})
+		metrics.Requests++
+		metrics.recordUsage(usage)
+		metrics.syncTracker(tracker)
 		e.log.InfoContext(ctx, "context compacted",
 			slog.String("step", step.ID),
 			slog.Int("estimated_tokens_after_compaction", tracker.EstimatedNextPromptTokens()),
 		)
+
+		if tracker.EstimatedNextPromptTokens() <= fitLimit && tracker.EstimatedNextPromptTokens() <= targetLimit {
+			return nil
+		}
 	}
 
+	metrics.syncTracker(tracker)
+	if tracker.EstimatedNextPromptTokens() > fitLimit {
+		err := fmt.Errorf(
+			"executor: prompt still exceeds fit limit after compaction: estimated %d tokens, fit limit %d, context window %d",
+			tracker.EstimatedNextPromptTokens(),
+			fitLimit,
+			tracker.ContextWindow(),
+		)
+		metrics.recordBudgetExceeded(err.Error())
+		return err
+	}
 	return nil
 }
 
@@ -75,21 +103,29 @@ func (e *Executor) compactMessages(
 	ctx context.Context,
 	req llm.ChatCompletionRequest,
 	profile tokens.ModelProfile,
+	targetLimit int,
+	fitLimit int,
 ) ([]llm.Message, bool, llm.Usage, error) {
+	if len(req.Messages) == 0 {
+		return nil, false, llm.Usage{}, nil
+	}
+
 	head, compactable, tail := splitMessagesForCompaction(req.Messages)
 	if len(compactable) == 0 {
-		return req.Messages, false, llm.Usage{}, nil
+		compacted, changed := fitCompactedConversation(e.tokenizer, profile, head, nil, tail, targetLimit, fitLimit, req.Model)
+		return compacted, changed, llm.Usage{}, nil
 	}
 
 	blocks := renderCompactionBlocks(compactable)
 	if len(blocks) == 0 {
 		return req.Messages, false, llm.Usage{}, nil
 	}
-	budget := profile.ContextWindow / 2
-	if budget <= 0 {
-		budget = tokens.DefaultFallbackContextWindow / 2
+
+	inputBudget := fitLimit / 2
+	if inputBudget <= 0 {
+		inputBudget = tokens.DefaultFallbackContextWindow / 2
 	}
-	blocks = trimCompactionBlocks(e.tokenizer, profile, blocks, budget)
+	blocks = trimCompactionBlocks(e.tokenizer, profile, blocks, inputBudget)
 	if len(blocks) == 0 {
 		return req.Messages, false, llm.Usage{}, nil
 	}
@@ -121,14 +157,12 @@ func (e *Executor) compactMessages(
 		return nil, false, resp.Usage, fmt.Errorf("executor: compact request returned an empty summary")
 	}
 
-	compacted := make([]llm.Message, 0, len(head)+1+len(tail))
-	compacted = append(compacted, head...)
-	compacted = append(compacted, llm.Message{
+	summaryMsg := llm.Message{
 		Role:    llm.RoleUser,
 		Content: buildCompactionSummaryContent(req.Model, summary),
-	})
-	compacted = append(compacted, tail...)
-	return compacted, true, resp.Usage, nil
+	}
+	compacted, changed := fitCompactedConversation(e.tokenizer, profile, head, &summaryMsg, tail, targetLimit, fitLimit, req.Model)
+	return compacted, changed, resp.Usage, nil
 }
 
 func buildCompactionRequestContent(model string, blocks []string) string {
@@ -252,6 +286,175 @@ func trimCompactionBlocks(counter tokens.Counter, profile tokens.ModelProfile, b
 		out = out[1:]
 	}
 	return nil
+}
+
+func fitCompactedConversation(
+	counter tokens.Counter,
+	profile tokens.ModelProfile,
+	head []llm.Message,
+	summary *llm.Message,
+	tail []llm.Message,
+	targetLimit int,
+	fitLimit int,
+	model string,
+) ([]llm.Message, bool) {
+	out := make([]llm.Message, 0, len(head)+1+len(tail))
+	out = append(out, head...)
+	if summary != nil {
+		out = append(out, *summary)
+	}
+
+	baseEstimate := counter.EstimateMessages(profile.RequestedModel, &profile.ContextWindow, out)
+	if targetLimit <= 0 || targetLimit > fitLimit {
+		targetLimit = fitLimit
+	}
+	if fitLimit > 0 && baseEstimate.Tokens > fitLimit {
+		if summary != nil {
+			trimmed, ok := shrinkMessageForBudget(counter, profile, *summary, fitLimit-counter.EstimateMessages(profile.RequestedModel, &profile.ContextWindow, head).Tokens, model)
+			if ok {
+				out = append(append([]llm.Message(nil), head...), trimmed)
+				baseEstimate = counter.EstimateMessages(profile.RequestedModel, &profile.ContextWindow, out)
+			}
+		}
+	}
+
+	selectedTail := fitTailMessages(counter, profile, out, tail, targetLimit, fitLimit, model)
+	changed := len(selectedTail) != len(tail) || summary != nil
+	out = append(out, selectedTail...)
+	return out, changed
+}
+
+func fitTailMessages(
+	counter tokens.Counter,
+	profile tokens.ModelProfile,
+	base []llm.Message,
+	tail []llm.Message,
+	targetLimit int,
+	fitLimit int,
+	model string,
+) []llm.Message {
+	if len(tail) == 0 {
+		return nil
+	}
+	if targetLimit <= 0 || targetLimit > fitLimit {
+		targetLimit = fitLimit
+	}
+
+	selected := make([]llm.Message, 0, len(tail))
+	baseTokens := counter.EstimateMessages(profile.RequestedModel, &profile.ContextWindow, base).Tokens
+	currentTokens := baseTokens
+	for i := len(tail) - 1; i >= 0; i-- {
+		msg := tail[i]
+		estimate := counter.EstimateMessage(profile.RequestedModel, &profile.ContextWindow, msg)
+		if currentTokens+estimate.Tokens <= targetLimit {
+			selected = append([]llm.Message{msg}, selected...)
+			currentTokens += estimate.Tokens
+			continue
+		}
+
+		budget := targetLimit - currentTokens
+		trimmed, ok := shrinkMessageForBudget(counter, profile, msg, budget, model)
+		if !ok {
+			continue
+		}
+		trimmedEstimate := counter.EstimateMessage(profile.RequestedModel, &profile.ContextWindow, trimmed)
+		if currentTokens+trimmedEstimate.Tokens > fitLimit {
+			continue
+		}
+		selected = append([]llm.Message{trimmed}, selected...)
+		currentTokens += trimmedEstimate.Tokens
+	}
+	return selected
+}
+
+func shrinkMessageForBudget(
+	counter tokens.Counter,
+	profile tokens.ModelProfile,
+	msg llm.Message,
+	budget int,
+	model string,
+) (llm.Message, bool) {
+	if budget <= 0 {
+		return llm.Message{}, false
+	}
+	if msg.Role == llm.RoleTool {
+		if shrunk, ok := shrinkToolMessageForBudget(counter, profile, msg, budget); ok {
+			return shrunk, true
+		}
+	}
+
+	content := strings.TrimSpace(msg.Content)
+	if content == "" {
+		return llm.Message{}, false
+	}
+	trimmed := msg
+	prefix := "Context trimmed to fit the remaining token budget.\n\n"
+	candidates := []int{1200, 800, 400, 200}
+	for _, maxChars := range candidates {
+		trimmed.Content = prefix + crop(content, maxChars)
+		estimate := counter.EstimateMessage(profile.RequestedModel, &profile.ContextWindow, trimmed)
+		if estimate.Tokens <= budget {
+			return trimmed, true
+		}
+	}
+
+	trimmed.Content = prefix + crop(content, 80)
+	if estimate := counter.EstimateMessage(profile.RequestedModel, &profile.ContextWindow, trimmed); estimate.Tokens <= budget {
+		return trimmed, true
+	}
+	return llm.Message{}, false
+}
+
+func shrinkToolMessageForBudget(
+	counter tokens.Counter,
+	profile tokens.ModelProfile,
+	msg llm.Message,
+	budget int,
+) (llm.Message, bool) {
+	var out registry.ExecResult
+	if err := json.Unmarshal([]byte(msg.Content), &out); err != nil {
+		return llm.Message{}, false
+	}
+
+	preview := buildToolResultPreview(out)
+	if preview == "" {
+		preview = crop(strings.TrimSpace(msg.Content), 400)
+	}
+
+	compacted := registry.ExecResult{
+		Tool:            out.Tool,
+		Ok:              out.Ok,
+		ExitCode:        out.ExitCode,
+		Summary:         out.Summary,
+		Added:           out.Added,
+		Modified:        out.Modified,
+		Deleted:         out.Deleted,
+		ElapsedMs:       out.ElapsedMs,
+		NewWorkdir:      out.NewWorkdir,
+		ToolError:       out.ToolError,
+		Warning:         "Tool message was compacted to keep the dialog within the context budget.",
+		Suppressed:      true,
+		HardSuppressed:  true,
+		Preview:         preview,
+		ArtifactPath:    out.ArtifactPath,
+		EstimatedTokens: out.EstimatedTokens,
+		ThresholdTokens: out.ThresholdTokens,
+	}
+
+	for _, maxChars := range []int{800, 400, 200, 120, 80} {
+		compacted.Preview = crop(preview, maxChars)
+		data, err := json.Marshal(compacted)
+		if err != nil {
+			return llm.Message{}, false
+		}
+		trimmed := msg
+		trimmed.Content = string(data)
+		estimate := counter.EstimateMessage(profile.RequestedModel, &profile.ContextWindow, trimmed)
+		if estimate.Tokens <= budget {
+			return trimmed, true
+		}
+	}
+	return llm.Message{}, false
 }
 
 func mustJSON(v any) string {

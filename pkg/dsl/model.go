@@ -28,9 +28,18 @@ type Agent struct {
 	// ToolOutputWarnPercent задаёт порог предупреждения о слишком большом результате тула.
 	// По умолчанию используется 10% контекстного окна модели.
 	ToolOutputWarnPercent *int `yaml:"tool_output_warn_percent,omitempty"`
+	// ToolOutputHardCapPercent задаёт жёсткий порог для слишком больших результатов тула.
+	// Начиная с этого значения полный payload больше не помещается в контекст даже при force-запросе.
+	ToolOutputHardCapPercent *int `yaml:"tool_output_hard_cap_percent,omitempty"`
 	// AutoCompactPercent задаёт порог автоматического сжатия контекста.
 	// По умолчанию используется 85% контекстного окна модели.
 	AutoCompactPercent *int `yaml:"auto_compact_percent,omitempty"`
+	// CompactTargetPercent задаёт целевой размер контекста после compaction.
+	// По умолчанию используется 60% контекстного окна модели.
+	CompactTargetPercent *int `yaml:"compact_target_percent,omitempty"`
+	// ResponseReserveTokens задаёт минимальный запас токенов под следующий ответ модели.
+	// Если запас не помещается, запрос к LLM не отправляется.
+	ResponseReserveTokens *int `yaml:"response_reserve_tokens,omitempty"`
 	// TokenizerCacheDir указывает каталог для кэша model-specific tokenizer.json.
 	TokenizerCacheDir string `yaml:"tokenizer_cache_dir,omitempty"`
 }
@@ -125,6 +134,20 @@ type StepLLM struct {
 	// Пути к файлам с промптами (альтернатива inline-полям)
 	SystemPromptPath TemplateString `yaml:"system_prompt_path,omitempty"`
 	UserPromptPath   TemplateString `yaml:"user_prompt_path,omitempty"`
+	// MaxRequests задаёт максимальное число запросов к модели в пределах одного шага.
+	MaxRequests *int `yaml:"max_requests,omitempty"`
+	// MaxToolCalls задаёт максимальное число вызовов инструментов в пределах одного шага.
+	MaxToolCalls *int `yaml:"max_tool_calls,omitempty"`
+	// MaxCumulativePromptTokens задаёт лимит суммарных prompt_tokens шага.
+	MaxCumulativePromptTokens *int `yaml:"max_cumulative_prompt_tokens,omitempty"`
+	// MaxCumulativeTotalTokens задаёт лимит суммарных total_tokens шага.
+	MaxCumulativeTotalTokens *int `yaml:"max_cumulative_total_tokens,omitempty"`
+	// MaxCumulativeToolTokens задаёт лимит суммарного токен-бюджета tool-сообщений,
+	// которые были реально добавлены в историю диалога шага.
+	MaxCumulativeToolTokens *int `yaml:"max_cumulative_tool_tokens,omitempty"`
+	// ResponseValidator включает пост-валидацию финального ответа шага.
+	// Поддерживаемые значения: "review_file".
+	ResponseValidator string `yaml:"response_validator,omitempty"`
 }
 
 // StepShell описывает параметры шага type: shell.

@@ -19,10 +19,18 @@ type rawConfig struct {
 }
 
 type rawAgent struct {
-	Name        TemplateString `yaml:"name"`
-	Model       TemplateString `yaml:"model"`
-	ArtifactDir TemplateString `yaml:"artifact_dir"`
-	OpenAI      rawAgentOpenAI `yaml:"openai"`
+	Name                     TemplateString `yaml:"name"`
+	Model                    TemplateString `yaml:"model"`
+	ArtifactDir              TemplateString `yaml:"artifact_dir"`
+	OpenAI                   rawAgentOpenAI `yaml:"openai"`
+	ModelContextWindow       *int           `yaml:"model_context_window,omitempty"`
+	ToolOutputWarnPercent    *int           `yaml:"tool_output_warn_percent,omitempty"`
+	ToolOutputHardCapPercent *int           `yaml:"tool_output_hard_cap_percent,omitempty"`
+	AutoCompactPercent       *int           `yaml:"auto_compact_percent,omitempty"`
+	CompactTargetPercent     *int           `yaml:"compact_target_percent,omitempty"`
+	ResponseReserveTokens    *int           `yaml:"response_reserve_tokens,omitempty"`
+	TokenizerCacheDir        TemplateString `yaml:"tokenizer_cache_dir,omitempty"`
+	Reasoning                bool           `yaml:"reasoning,omitempty"`
 }
 
 type rawAgentOpenAI struct {
@@ -90,6 +98,10 @@ func normalize(raw rawConfig) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	tokenizerCacheDir, err := render(raw.Agent.TokenizerCacheDir, "agent.tokenizer_cache_dir")
+	if err != nil {
+		return nil, err
+	}
 
 	cfg := &Config{
 		Version:   raw.Version,
@@ -98,9 +110,17 @@ func normalize(raw rawConfig) (*Config, error) {
 		Steps:     raw.Steps,
 		Approvers: raw.Approvers,
 		Agent: Agent{
-			Name:        name,
-			Model:       model,
-			ArtifactDir: artifactDir,
+			Name:                     name,
+			Model:                    model,
+			ArtifactDir:              artifactDir,
+			Reasoning:                raw.Agent.Reasoning,
+			ModelContextWindow:       raw.Agent.ModelContextWindow,
+			ToolOutputWarnPercent:    raw.Agent.ToolOutputWarnPercent,
+			ToolOutputHardCapPercent: raw.Agent.ToolOutputHardCapPercent,
+			AutoCompactPercent:       raw.Agent.AutoCompactPercent,
+			CompactTargetPercent:     raw.Agent.CompactTargetPercent,
+			ResponseReserveTokens:    raw.Agent.ResponseReserveTokens,
+			TokenizerCacheDir:        tokenizerCacheDir,
 			OpenAI: AgentOpenAI{
 				BaseURL:   baseURL,
 				APIKeyEnv: apiKeyEnv,

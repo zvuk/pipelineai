@@ -15,11 +15,14 @@ func (e *Executor) templateAgent() map[string]any {
 			"base_url":    a.OpenAI.BaseURL,
 			"api_key_env": a.OpenAI.APIKeyEnv,
 		},
-		"reasoning":                a.Reasoning,
-		"model_context_window":     a.ModelContextWindow,
-		"tool_output_warn_percent": a.ToolOutputWarnPercent,
-		"auto_compact_percent":     a.AutoCompactPercent,
-		"tokenizer_cache_dir":      a.TokenizerCacheDir,
+		"reasoning":                    a.Reasoning,
+		"model_context_window":         a.ModelContextWindow,
+		"tool_output_warn_percent":     a.ToolOutputWarnPercent,
+		"tool_output_hard_cap_percent": a.ToolOutputHardCapPercent,
+		"auto_compact_percent":         a.AutoCompactPercent,
+		"compact_target_percent":       a.CompactTargetPercent,
+		"response_reserve_tokens":      a.ResponseReserveTokens,
+		"tokenizer_cache_dir":          a.TokenizerCacheDir,
 	}
 }
 

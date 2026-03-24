@@ -68,9 +68,12 @@ func testToolConfig(t *testing.T, userPrompt string, toolWarnPercent, autoCompac
 				BaseURL:   "http://localhost",
 				APIKeyEnv: "LLM_API_KEY",
 			},
-			ModelContextWindow:    intPtr(contextWindow),
-			ToolOutputWarnPercent: intPtr(toolWarnPercent),
-			AutoCompactPercent:    intPtr(autoCompactPercent),
+			ModelContextWindow:       intPtr(contextWindow),
+			ToolOutputWarnPercent:    intPtr(toolWarnPercent),
+			ToolOutputHardCapPercent: intPtr(25),
+			AutoCompactPercent:       intPtr(autoCompactPercent),
+			CompactTargetPercent:     intPtr(60),
+			ResponseReserveTokens:    intPtr(64),
 		},
 		Steps: []dsl.Step{{
 			ID:   "tool_step",
@@ -130,7 +133,7 @@ func TestRunLLMStep_LargeToolResultWarnsFirstTime(t *testing.T) {
 	}
 }
 
-func TestRunLLMStep_LargeToolResultReturnsFullPayloadOnRepeat(t *testing.T) {
+func TestRunLLMStep_LargeToolResultStaysSuppressedOnRepeatWithoutForce(t *testing.T) {
 	cfg := testToolConfig(t, "Нужен повтор", 10, 95, 1000)
 	client := &fakeClientSeq{responses: []llm.ChatCompletionResponse{
 		toolCallResponse(`{"command":["bash","-lc","head -c 420 /dev/zero | tr '\\0' y"]}`),
@@ -151,11 +154,14 @@ func TestRunLLMStep_LargeToolResultReturnsFullPayloadOnRepeat(t *testing.T) {
 	if !strings.Contains(firstToolMsg.Content, `"suppressed":true`) {
 		t.Fatalf("expected first tool result to be suppressed, got %s", firstToolMsg.Content)
 	}
-	if strings.Contains(secondToolMsg.Content, `"suppressed":true`) {
-		t.Fatalf("expected repeated tool call to return full payload, got %s", secondToolMsg.Content)
+	if !strings.Contains(secondToolMsg.Content, `"suppressed":true`) {
+		t.Fatalf("expected repeated tool call to stay suppressed, got %s", secondToolMsg.Content)
 	}
-	if !strings.Contains(secondToolMsg.Content, `"stdout":"yyyy`) {
-		t.Fatalf("expected repeated tool call to include stdout, got %s", secondToolMsg.Content)
+	if strings.Contains(secondToolMsg.Content, `"stdout":"yyyy`) {
+		t.Fatalf("expected repeated tool call to omit full stdout without explicit force, got %s", secondToolMsg.Content)
+	}
+	if !strings.Contains(secondToolMsg.Content, `"artifact_path":"`) {
+		t.Fatalf("expected repeated tool call to include artifact_path, got %s", secondToolMsg.Content)
 	}
 }
 
@@ -176,6 +182,30 @@ func TestRunLLMStep_ForceFullOutputBypassesWarning(t *testing.T) {
 	}
 	if !strings.Contains(toolMsg.Content, `"stdout":"zzzz`) {
 		t.Fatalf("expected full stdout in force_full_output response, got %s", toolMsg.Content)
+	}
+}
+
+func TestRunLLMStep_ForceFullOutputIgnoredBeyondHardCap(t *testing.T) {
+	cfg := testToolConfig(t, "Нужен форс поверх hard cap", 10, 95, 1000)
+	cfg.Agent.ToolOutputHardCapPercent = intPtr(11)
+	client := &fakeClientSeq{responses: []llm.ChatCompletionResponse{
+		toolCallResponse(`{"command":["bash","-lc","head -c 900 /dev/zero | tr '\\0' q"],"force_full_output":true}`),
+		finalTextResponse("done"),
+	}}
+	exec := newTokenTestExecutor(t, cfg, client)
+
+	if _, _, err := exec.RunLLMStep(context.Background(), "tool_step", nil); err != nil {
+		t.Fatalf("step execution failed: %v", err)
+	}
+	toolMsg := client.requests[1].Messages[len(client.requests[1].Messages)-1]
+	if !strings.Contains(toolMsg.Content, `"suppressed":true`) {
+		t.Fatalf("expected hard-cap result to remain suppressed, got %s", toolMsg.Content)
+	}
+	if !strings.Contains(toolMsg.Content, `"hard_suppressed":true`) {
+		t.Fatalf("expected hard_suppressed flag, got %s", toolMsg.Content)
+	}
+	if !strings.Contains(toolMsg.Content, `"artifact_path":"`) {
+		t.Fatalf("expected artifact_path for hard-capped result, got %s", toolMsg.Content)
 	}
 }
 
@@ -233,6 +263,48 @@ func TestRunLLMStep_AutoCompactionPreservesCriticalFacts(t *testing.T) {
 	}
 	if len(client.requests) != 4 {
 		t.Fatalf("expected 4 requests including compaction, got %d", len(client.requests))
+	}
+}
+
+func TestRunLLMStep_PreflightRejectsOversizedPromptBeforeLLMCall(t *testing.T) {
+	cfg := testToolConfig(t, strings.Repeat("переполнение ", 80), 10, 85, 200)
+	cfg.Agent.ResponseReserveTokens = intPtr(80)
+	client := &callDrivenClient{
+		t: t,
+		fn: func(call int, req llm.ChatCompletionRequest) (llm.ChatCompletionResponse, error) {
+			t.Fatalf("request must not reach llm client, got call #%d with %#v", call, req)
+			return llm.ChatCompletionResponse{}, nil
+		},
+	}
+	exec := newTokenTestExecutor(t, cfg, client)
+
+	_, _, err := exec.RunLLMStep(context.Background(), "tool_step", nil)
+	if err == nil {
+		t.Fatal("expected oversized prompt to be rejected before llm call")
+	}
+	if !strings.Contains(err.Error(), "fit limit") {
+		t.Fatalf("expected fit limit error, got %v", err)
+	}
+	if len(client.requests) != 0 {
+		t.Fatalf("expected zero llm requests, got %d", len(client.requests))
+	}
+}
+
+func TestRunLLMStep_MaxRequestLimitStopsToolLoop(t *testing.T) {
+	cfg := testToolConfig(t, "Нужен tool loop", 10, 95, 1000)
+	cfg.Steps[0].LLM.MaxRequests = intPtr(1)
+	client := &fakeClientSeq{responses: []llm.ChatCompletionResponse{
+		toolCallResponse(`{"command":["bash","-lc","echo -n x"]}`),
+		finalTextResponse("done"),
+	}}
+	exec := newTokenTestExecutor(t, cfg, client)
+
+	_, _, err := exec.RunLLMStep(context.Background(), "tool_step", nil)
+	if err == nil {
+		t.Fatal("expected max request limit error")
+	}
+	if !strings.Contains(err.Error(), "llm request limit reached") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
