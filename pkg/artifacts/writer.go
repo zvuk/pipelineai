@@ -3,6 +3,7 @@ package artifacts
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -136,6 +137,58 @@ func (m *Manager) WriteToolPayload(stepID string, toolName string, payload any) 
 	return path, nil
 }
 
+// WriteToolCaptureBundle сохраняет результат инструмента и связанные полные потоки вывода в отдельный каталог.
+// В каталоге всегда создаётся result.json, а переданные captureFiles копируются как отдельные файлы.
+func (m *Manager) WriteToolCaptureBundle(stepID string, toolName string, payload any, captureFiles map[string]string) (string, error) {
+	if strings.TrimSpace(stepID) == "" {
+		return "", fmt.Errorf("artifacts: stepID must not be empty")
+	}
+	if strings.TrimSpace(toolName) == "" {
+		toolName = "tool"
+	}
+	safeToolName := sanitizeArtifactName(toolName)
+	dir := filepath.Join(m.root, "tools", stepID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("artifacts: failed to create directory %s: %w", dir, err)
+	}
+
+	ts := time.Now().UTC().Format("20060102T150405.000000000Z")
+	bundleDir := filepath.Join(dir, fmt.Sprintf("%s-%s", ts, safeToolName))
+	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
+		return "", fmt.Errorf("artifacts: failed to create directory %s: %w", bundleDir, err)
+	}
+
+	resultPath := filepath.Join(bundleDir, "result.json")
+	file, err := os.OpenFile(resultPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("artifacts: failed to open file %s: %w", resultPath, err)
+	}
+	enc := json.NewEncoder(file)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(payload); err != nil {
+		file.Close()
+		return "", fmt.Errorf("artifacts: failed to write json to %s: %w", resultPath, err)
+	}
+	if err := file.Close(); err != nil {
+		return "", fmt.Errorf("artifacts: failed to close file %s: %w", resultPath, err)
+	}
+
+	for name, src := range captureFiles {
+		src = strings.TrimSpace(src)
+		if src == "" {
+			continue
+		}
+		dst := filepath.Join(bundleDir, sanitizeArtifactName(name))
+		if filepath.Ext(dst) == "" {
+			dst += ".txt"
+		}
+		if err := copyArtifactFile(dst, src); err != nil {
+			return "", err
+		}
+	}
+	return bundleDir, nil
+}
+
 // latestLLMArtifact возвращает путь и meta.hash последнего по имени JSON файла в каталоге шага.
 func latestLLMArtifact(dir string) (string, string, error) {
 	entries, err := os.ReadDir(dir)
@@ -200,4 +253,25 @@ func sanitizeArtifactName(name string) string {
 		return "tool"
 	}
 	return out
+}
+
+func copyArtifactFile(dst string, src string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("artifacts: failed to open source file %s: %w", src, err)
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("artifacts: failed to open destination file %s: %w", dst, err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return fmt.Errorf("artifacts: failed to copy file %s to %s: %w", src, dst, err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("artifacts: failed to close destination file %s: %w", dst, err)
+	}
+	return nil
 }

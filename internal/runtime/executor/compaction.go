@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	compactPrompt              = "Вы выполняете КОМПАКТИЗАЦИЮ КОНТЕКСТНОЙ КОНТРОЛЬНОЙ ТОЧКИ. Подготовьте сводку-передачу для другой LLM, которая продолжит задачу.\n\nВключите:\n- Текущий прогресс и ключевые принятые решения\n- Важный контекст, ограничения и предпочтения пользователя\n- Что осталось сделать дальше (понятные следующие шаги)\n- Любые критически важные данные, примеры или ссылки, нужные для продолжения\n\nПишите кратко, структурированно и так, чтобы следующая LLM могла бесшовно продолжить работу.\n"
-	compactSummaryPrefix       = "Другая языковая модель уже начала решать эту задачу и подготовила сводку по проделанной работе. Вам также доступно состояние инструментов, которые она использовала. Используйте эту информацию, чтобы продолжить уже сделанное и не дублировать работу. Ниже приведена сводка от предыдущей модели; опирайтесь на неё в дальнейшем анализе:"
+	compactPrompt              = "Вы выполняете КОМПАКТНУЮ ПЕРЕДАЧУ РАБОЧЕГО КОНТЕКСТА для следующей LLM, которая продолжит эту же задачу.\n\nПодготовьте короткую, но операционную сводку. Обязательно сохраните:\n- текущий прогресс и уже принятые решения;\n- факты, ограничения, предпочтения пользователя и важные договорённости;\n- что уже проверено, какие гипотезы подтверждены или отброшены;\n- какие действия или шаги ещё остались;\n- все важные `capture_ref` / пути к сохранённым большим результатам инструментов и как их читать узко.\n\nНе пересказывайте диалог подряд. Дайте рабочую память, с которой следующая модель сможет продолжить задачу без повторного блуждания.\n"
+	compactSummaryPrefix       = "Ниже приведена рабочая сводка от предыдущей модели, которая уже выполняла эту задачу. Используйте её как оперативную память: продолжайте уже начатую работу, не повторяйте широкие поиски и учитывайте сохранённые `capture_ref`, ограничения и незавершённые шаги."
 	compactionPromptTag        = "SUMMARIZATION_PROMPT"
 	compactionHistoryTag       = "COMPACTION_HISTORY"
 	compactionSummaryTag       = "COMPACTION_SUMMARY"
@@ -225,6 +225,14 @@ func splitMessagesForCompaction(messages []llm.Message) (head []llm.Message, com
 	}
 
 	tailStart := len(rest) - 4
+	for i := len(rest) - 1; i >= 0; i-- {
+		if rest[i].Role == llm.RoleUser {
+			if i > 0 {
+				tailStart = i
+			}
+			break
+		}
+	}
 	if rest[tailStart].Role == llm.RoleTool && tailStart > 0 {
 		tailStart--
 	}
@@ -416,29 +424,33 @@ func shrinkToolMessageForBudget(
 		return llm.Message{}, false
 	}
 
-	preview := buildToolResultPreview(out)
+	preview := buildToolResultPreview(out, 800)
 	if preview == "" {
 		preview = crop(strings.TrimSpace(msg.Content), 400)
 	}
 
 	compacted := registry.ExecResult{
-		Tool:            out.Tool,
-		Ok:              out.Ok,
-		ExitCode:        out.ExitCode,
-		Summary:         out.Summary,
-		Added:           out.Added,
-		Modified:        out.Modified,
-		Deleted:         out.Deleted,
-		ElapsedMs:       out.ElapsedMs,
-		NewWorkdir:      out.NewWorkdir,
-		ToolError:       out.ToolError,
-		Warning:         "Tool message was compacted to keep the dialog within the context budget.",
-		Suppressed:      true,
-		HardSuppressed:  true,
-		Preview:         preview,
-		ArtifactPath:    out.ArtifactPath,
-		EstimatedTokens: out.EstimatedTokens,
-		ThresholdTokens: out.ThresholdTokens,
+		Tool:             out.Tool,
+		Ok:               out.Ok,
+		ExitCode:         out.ExitCode,
+		Summary:          out.Summary,
+		Added:            out.Added,
+		Modified:         out.Modified,
+		Deleted:          out.Deleted,
+		ElapsedMs:        out.ElapsedMs,
+		NewWorkdir:       out.NewWorkdir,
+		ToolError:        out.ToolError,
+		Warning:          "Tool message was compacted to keep the dialog within the context budget.",
+		Suppressed:       true,
+		HardSuppressed:   true,
+		Preview:          preview,
+		CaptureRef:       out.CaptureRef,
+		ArtifactPath:     out.ArtifactPath,
+		CaptureKind:      out.CaptureKind,
+		CapturePersisted: out.CapturePersisted,
+		SuggestedReads:   out.SuggestedReads,
+		EstimatedTokens:  out.EstimatedTokens,
+		ThresholdTokens:  out.ThresholdTokens,
 	}
 
 	for _, maxChars := range []int{800, 400, 200, 120, 80} {

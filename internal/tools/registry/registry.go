@@ -17,18 +17,32 @@ import (
 	"github.com/zvuk/pipelineai/pkg/dsl"
 )
 
+const (
+	toolResultModePersistOnOverflow = "persist_on_overflow"
+	toolResultModePersistAlways     = "persist_always"
+)
+
 // ExecResult — унифицированный результат выполнения инструмента для возврата модели.
 type ExecResult struct {
 	Tool string `json:"tool"`
 	Ok   bool   `json:"ok"`
 	// Всегда включаем stdout/stderr/exit_code, даже если пустые/0 — детерминизм для модели
-	Stdout   string   `json:"stdout"`
-	Stderr   string   `json:"stderr"`
-	ExitCode int      `json:"exit_code"`
-	Summary  string   `json:"summary,omitempty"`
-	Added    []string `json:"added,omitempty"`
-	Modified []string `json:"modified,omitempty"`
-	Deleted  []string `json:"deleted,omitempty"`
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exit_code"`
+	// StdoutBytes и StderrBytes содержат полный объём потоков в байтах до усечения preview.
+	StdoutBytes int64 `json:"stdout_bytes,omitempty"`
+	StderrBytes int64 `json:"stderr_bytes,omitempty"`
+	// StdoutLines и StderrLines содержат число строк в полном выводе до усечения preview.
+	StdoutLines int64 `json:"stdout_lines,omitempty"`
+	StderrLines int64 `json:"stderr_lines,omitempty"`
+	// StdoutTruncated и StderrTruncated показывают, был ли соответствующий preview усечён.
+	StdoutTruncated bool     `json:"stdout_truncated,omitempty"`
+	StderrTruncated bool     `json:"stderr_truncated,omitempty"`
+	Summary         string   `json:"summary,omitempty"`
+	Added           []string `json:"added,omitempty"`
+	Modified        []string `json:"modified,omitempty"`
+	Deleted         []string `json:"deleted,omitempty"`
 	// Длительность в мс отдельным числом
 	ElapsedMs  int64  `json:"elapsed_ms"`
 	NewWorkdir string `json:"new_workdir,omitempty"`
@@ -44,8 +58,21 @@ type ExecResult struct {
 	Preview         string `json:"preview,omitempty"`
 	// HardSuppressed означает, что даже force-повтор не вернёт полный payload в контекст.
 	HardSuppressed bool `json:"hard_suppressed,omitempty"`
-	// ArtifactPath указывает путь к сохранённому полному payload инструмента.
+	// CaptureRef указывает путь к сохранённому полному результату инструмента.
+	CaptureRef string `json:"capture_ref,omitempty"`
+	// ArtifactPath оставлен как алиас для обратной совместимости.
 	ArtifactPath string `json:"artifact_path,omitempty"`
+	// SuggestedReads содержит рекомендуемые узкие команды для чтения capture_ref.
+	SuggestedReads []string `json:"suggested_reads,omitempty"`
+	// ResultMode отражает фактически применённый режим возврата результата.
+	ResultMode string `json:"result_mode,omitempty"`
+	// CaptureKind описывает формат сохранённого capture_ref.
+	CaptureKind string `json:"capture_kind,omitempty"`
+	// CapturePersisted показывает, был ли полный результат вынесен из диалога в артефакт.
+	CapturePersisted bool `json:"capture_persisted,omitempty"`
+	// StdoutCapturePath и StderrCapturePath — служебные временные пути к полным потокам shell.
+	StdoutCapturePath string `json:"-"`
+	StderrCapturePath string `json:"-"`
 }
 
 // Registry — реестр встроенных инструментов и пользовательских функций.
@@ -77,14 +104,19 @@ func New(cfg *dsl.Config) *Registry {
 			"base_url":    a.OpenAI.BaseURL,
 			"api_key_env": a.OpenAI.APIKeyEnv,
 		},
-		"reasoning":                    a.Reasoning,
-		"model_context_window":         a.ModelContextWindow,
-		"tool_output_warn_percent":     a.ToolOutputWarnPercent,
-		"tool_output_hard_cap_percent": a.ToolOutputHardCapPercent,
-		"auto_compact_percent":         a.AutoCompactPercent,
-		"compact_target_percent":       a.CompactTargetPercent,
-		"response_reserve_tokens":      a.ResponseReserveTokens,
-		"tokenizer_cache_dir":          a.TokenizerCacheDir,
+		"reasoning":                         a.Reasoning,
+		"budget_mode":                       a.BudgetMode,
+		"model_context_window":              a.ModelContextWindow,
+		"tool_output_warn_percent":          a.ToolOutputWarnPercent,
+		"tool_output_hard_cap_percent":      a.ToolOutputHardCapPercent,
+		"auto_compact_percent":              a.AutoCompactPercent,
+		"compact_target_percent":            a.CompactTargetPercent,
+		"response_reserve_tokens":           a.ResponseReserveTokens,
+		"tool_result_mode":                  a.ToolResultMode,
+		"tool_result_preview_tokens":        a.ToolResultPreviewTokens,
+		"shell_capture_max_bytes":           a.ShellCaptureMaxBytes,
+		"disable_inline_tool_call_fallback": a.DisableInlineToolCallFallback,
+		"tokenizer_cache_dir":               a.TokenizerCacheDir,
 	}
 
 	return &Registry{
@@ -145,6 +177,8 @@ func (r *Registry) ExecCall(
 	allowed []string,
 	currentWorkdir string,
 	defaultTimeout time.Duration,
+	toolResultMode string,
+	shellCaptureMaxBytes int,
 	shellAppr *approval.ShellApprover,
 	applyAppr *approval.ApplyPatchApprover,
 ) ExecResult {
@@ -258,14 +292,21 @@ func (r *Registry) ExecCall(
 		if payload.Workdir == "" {
 			payload.Workdir = currentWorkdir
 		}
-		res, err := sh.Exec(ctx, sh.Args{Command: payload.Command, Workdir: payload.Workdir, Timeout: to}, shellAppr)
+		res, err := sh.Exec(ctx, sh.Args{
+			Command:         payload.Command,
+			Workdir:         payload.Workdir,
+			Timeout:         to,
+			MaxCaptureBytes: shellCaptureMaxBytes,
+			PersistOverflow: toolResultMode == toolResultModePersistOnOverflow || toolResultMode == toolResultModePersistAlways,
+			PersistAlways:   toolResultMode == toolResultModePersistAlways,
+		}, shellAppr)
 		if res.Blocked {
-			return ExecResult{Tool: name, Ok: false, Stdout: res.Stdout, Stderr: res.Stderr, ExitCode: res.ExitCode, ElapsedMs: res.Elapsed.Milliseconds(), NewWorkdir: res.NewWorkdir, ToolError: res.Message}
+			return shellExecResult(name, false, res, res.Message)
 		}
 		if err != nil {
-			return ExecResult{Tool: name, Ok: false, Stdout: res.Stdout, Stderr: res.Stderr, ExitCode: res.ExitCode, ElapsedMs: res.Elapsed.Milliseconds(), NewWorkdir: res.NewWorkdir, ToolError: err.Error()}
+			return shellExecResult(name, false, res, err.Error())
 		}
-		return ExecResult{Tool: name, Ok: true, Stdout: res.Stdout, Stderr: res.Stderr, ExitCode: res.ExitCode, ElapsedMs: res.Elapsed.Milliseconds(), NewWorkdir: res.NewWorkdir}
+		return shellExecResult(name, true, res, "")
 
 	case "apply_patch":
 		var payload struct {
@@ -351,14 +392,42 @@ func (r *Registry) ExecCall(
 			return ExecResult{Tool: name, Ok: false, ToolError: fmt.Sprintf("failed to render shell template: %v", err)}
 		}
 		// Запускаем через встроенный shell
-		res, err := sh.Exec(ctx, sh.Args{Command: []string{"bash", "-lc", script}, Workdir: currentWorkdir, Timeout: defaultTimeout}, shellAppr)
+		res, err := sh.Exec(ctx, sh.Args{
+			Command:         []string{"bash", "-lc", script},
+			Workdir:         currentWorkdir,
+			Timeout:         defaultTimeout,
+			MaxCaptureBytes: shellCaptureMaxBytes,
+			PersistOverflow: toolResultMode == toolResultModePersistOnOverflow || toolResultMode == toolResultModePersistAlways,
+			PersistAlways:   toolResultMode == toolResultModePersistAlways,
+		}, shellAppr)
 		if res.Blocked {
-			return ExecResult{Tool: name, Ok: false, Stdout: res.Stdout, Stderr: res.Stderr, ExitCode: res.ExitCode, ElapsedMs: res.Elapsed.Milliseconds(), NewWorkdir: res.NewWorkdir, ToolError: res.Message}
+			return shellExecResult(name, false, res, res.Message)
 		}
 		if err != nil {
-			return ExecResult{Tool: name, Ok: false, Stdout: res.Stdout, Stderr: res.Stderr, ExitCode: res.ExitCode, ElapsedMs: res.Elapsed.Milliseconds(), NewWorkdir: res.NewWorkdir, ToolError: err.Error()}
+			return shellExecResult(name, false, res, err.Error())
 		}
-		return ExecResult{Tool: name, Ok: true, Stdout: res.Stdout, Stderr: res.Stderr, ExitCode: res.ExitCode, ElapsedMs: res.Elapsed.Milliseconds(), NewWorkdir: res.NewWorkdir}
+		return shellExecResult(name, true, res, "")
+	}
+}
+
+func shellExecResult(name string, ok bool, res sh.Result, toolError string) ExecResult {
+	return ExecResult{
+		Tool:              name,
+		Ok:                ok,
+		Stdout:            res.Stdout,
+		Stderr:            res.Stderr,
+		ExitCode:          res.ExitCode,
+		StdoutBytes:       res.StdoutBytes,
+		StderrBytes:       res.StderrBytes,
+		StdoutLines:       res.StdoutLines,
+		StderrLines:       res.StderrLines,
+		StdoutTruncated:   res.StdoutTruncated,
+		StderrTruncated:   res.StderrTruncated,
+		ElapsedMs:         res.Elapsed.Milliseconds(),
+		NewWorkdir:        res.NewWorkdir,
+		ToolError:         toolError,
+		StdoutCapturePath: res.StdoutCapturePath,
+		StderrCapturePath: res.StderrCapturePath,
 	}
 }
 

@@ -513,6 +513,7 @@ func buildPartitionManifestItem(unit []partitionCandidate, cfg partitionRuntimeC
 	unitDir := filepath.Join(cfg.UnitResourcesDir, unitID)
 	unitRulesDir := filepath.Join(unitDir, "rules")
 	unitPromptPath := filepath.Join(unitDir, "file-review.md")
+	unitContextPath := filepath.Join(unitDir, "unit-context.json")
 
 	if err := os.RemoveAll(unitDir); err != nil {
 		return nil, fmt.Errorf("executor: failed to cleanup unit dir %s: %w", unitDir, err)
@@ -535,8 +536,29 @@ func buildPartitionManifestItem(unit []partitionCandidate, cfg partitionRuntimeC
 		return nil, err
 	}
 
+	unitContext := map[string]any{
+		"id":                unitID,
+		"unit_type":         item["unit_type"],
+		"primary_file_path": item["primary_file_path"],
+		"file_paths_csv":    item["file_paths_csv"],
+		"file_count":        item["file_count"],
+		"files":             filesPayload,
+		"strategy_profile":  profileState.SelectedProfile,
+		"prompt_file_path":  unitPromptPath,
+		"rules_dir":         unitRulesDir,
+		"narrow_reading_guidance": []string{
+			"Start from this unit context and current file diffs before any broad repository search.",
+			"Prefer narrow jq filters, line ranges and rg queries over whole-repo traversal.",
+			"If a tool result exposes capture_ref, inspect it in chunks with head, tail, sed, jq or rg.",
+		},
+	}
+	if err := writeJSONFile(unitContextPath, unitContext); err != nil {
+		return nil, err
+	}
+
 	item["prompt_file_path"] = unitPromptPath
 	item["rules_dir"] = unitRulesDir
+	item["unit_context_path"] = unitContextPath
 	return item, nil
 }
 

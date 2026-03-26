@@ -24,7 +24,7 @@ func ShellToolSpec() llm.Tool {
 			},
 			"force_full_output": map[string]any{
 				"type":        "boolean",
-				"description": "When true, return the full tool output even if it is large.",
+				"description": "When true, return the full tool output even if it is large. This flag is ignored if the full payload would overflow the current context window or exceed the hard tool-output cap.",
 			},
 		},
 		"required":              []string{"command"},
@@ -52,7 +52,7 @@ func ApplyPatchToolSpecJSON() llm.Tool {
 			},
 			"force_full_output": map[string]any{
 				"type":        "boolean",
-				"description": "When true, return the full tool output even if it is large.",
+				"description": "When true, return the full tool output even if it is large. This flag is ignored if the full payload would overflow the current context window or exceed the hard tool-output cap.",
 			},
 		},
 		"required":              []string{"input"},

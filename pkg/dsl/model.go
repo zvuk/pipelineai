@@ -23,6 +23,9 @@ type Agent struct {
 	OpenAI      AgentOpenAI `yaml:"openai"`
 	// Reasoning включает передачу и сохранение reasoning, если модель возвращает его (по умолчанию false)
 	Reasoning bool `yaml:"reasoning,omitempty"`
+	// BudgetMode задаёт режим обработки budget-лимитов шага.
+	// Поддерживаемые значения: "hard_stop", "warn", "continue_with_compaction".
+	BudgetMode string `yaml:"budget_mode,omitempty"`
 	// ModelContextWindow переопределяет размер контекстного окна модели в токенах.
 	ModelContextWindow *int `yaml:"model_context_window,omitempty"`
 	// ToolOutputWarnPercent задаёт порог предупреждения о слишком большом результате тула.
@@ -40,6 +43,18 @@ type Agent struct {
 	// ResponseReserveTokens задаёт минимальный запас токенов под следующий ответ модели.
 	// Если запас не помещается, запрос к LLM не отправляется.
 	ResponseReserveTokens *int `yaml:"response_reserve_tokens,omitempty"`
+	// ToolResultMode задаёт общий режим обработки больших результатов тулов.
+	// Поддерживаемые значения: "inline", "truncate", "persist_on_overflow", "persist_always".
+	ToolResultMode string `yaml:"tool_result_mode,omitempty"`
+	// ToolResultPreviewTokens задаёт целевой бюджет preview-представления результата тула.
+	// Используется при формировании компактного envelope для модели.
+	ToolResultPreviewTokens *int `yaml:"tool_result_preview_tokens,omitempty"`
+	// ShellCaptureMaxBytes задаёт максимальный объём stdout/stderr, который удерживается в памяти
+	// при выполнении shell-команды до перехода в усечённый режим захвата.
+	ShellCaptureMaxBytes *int `yaml:"shell_capture_max_bytes,omitempty"`
+	// DisableInlineToolCallFallback запрещает эвристическое извлечение tool-call из обычного текста модели.
+	// Полезно для моделей, которые иногда смешивают служебный формат и имя инструмента.
+	DisableInlineToolCallFallback bool `yaml:"disable_inline_tool_call_fallback,omitempty"`
 	// TokenizerCacheDir указывает каталог для кэша model-specific tokenizer.json.
 	TokenizerCacheDir string `yaml:"tokenizer_cache_dir,omitempty"`
 }
@@ -145,6 +160,16 @@ type StepLLM struct {
 	// MaxCumulativeToolTokens задаёт лимит суммарного токен-бюджета tool-сообщений,
 	// которые были реально добавлены в историю диалога шага.
 	MaxCumulativeToolTokens *int `yaml:"max_cumulative_tool_tokens,omitempty"`
+	// BudgetMode переопределяет agent.budget_mode для конкретного шага.
+	BudgetMode string `yaml:"budget_mode,omitempty"`
+	// ToolResultMode переопределяет agent.tool_result_mode для конкретного шага.
+	ToolResultMode string `yaml:"tool_result_mode,omitempty"`
+	// ToolResultPreviewTokens переопределяет agent.tool_result_preview_tokens для конкретного шага.
+	ToolResultPreviewTokens *int `yaml:"tool_result_preview_tokens,omitempty"`
+	// ShellCaptureMaxBytes переопределяет agent.shell_capture_max_bytes для конкретного шага.
+	ShellCaptureMaxBytes *int `yaml:"shell_capture_max_bytes,omitempty"`
+	// DisableInlineToolCallFallback переопределяет agent.disable_inline_tool_call_fallback для конкретного шага.
+	DisableInlineToolCallFallback *bool `yaml:"disable_inline_tool_call_fallback,omitempty"`
 	// ResponseValidator включает пост-валидацию финального ответа шага.
 	// Поддерживаемые значения: "review_file".
 	ResponseValidator string `yaml:"response_validator,omitempty"`

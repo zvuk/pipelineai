@@ -29,7 +29,7 @@ func TestExecCall_ShellAllowed(t *testing.T) {
 	ctx := context.Background()
 	allowed := []string{"shell"}
 	tc := llm.ToolCall{Type: "function", Function: llm.FunctionCall{Name: "shell", Arguments: `{"command":["bash","-lc","echo -n hi"]}`}}
-	out := reg.ExecCall(ctx, tc, allowed, "", 3*time.Second, nil, nil)
+	out := reg.ExecCall(ctx, tc, allowed, "", 3*time.Second, toolResultModePersistOnOverflow, 64*1024, nil, nil)
 	if !out.Ok {
 		t.Fatalf("shell exec failed: %s", out.ToolError)
 	}
@@ -43,7 +43,7 @@ func TestExecCall_Disallowed(t *testing.T) {
 	ctx := context.Background()
 	allowed := []string{"shell"}
 	tc := llm.ToolCall{Type: "function", Function: llm.FunctionCall{Name: "apply_patch", Arguments: `{"input":"*** Begin Patch\n*** Add File: x.txt\n+ok\n*** End Patch\n"}`}}
-	out := reg.ExecCall(ctx, tc, allowed, "", 2*time.Second, nil, nil)
+	out := reg.ExecCall(ctx, tc, allowed, "", 2*time.Second, toolResultModePersistOnOverflow, 64*1024, nil, nil)
 	if out.Ok || out.ToolError == "" {
 		t.Fatalf("expected disallowed tool error, got: ok=%v err=%q", out.Ok, out.ToolError)
 	}
@@ -59,7 +59,7 @@ func TestExecCall_ApplyPatch_CreateFile(t *testing.T) {
 	ab, _ := json.Marshal(a)
 	tc := llm.ToolCall{Type: "function", Function: llm.FunctionCall{Name: "apply_patch", Arguments: string(ab)}}
 	// Используем пустой approver (nil) — разрешено всё
-	out := reg.ExecCall(ctx, tc, allowed, dir, 2*time.Second, nil, &approval.ApplyPatchApprover{})
+	out := reg.ExecCall(ctx, tc, allowed, dir, 2*time.Second, toolResultModePersistOnOverflow, 64*1024, nil, &approval.ApplyPatchApprover{})
 	if !out.Ok {
 		t.Fatalf("apply_patch failed: %s", out.ToolError)
 	}
@@ -103,7 +103,7 @@ func TestExecCall_UserFunction_HttpRequest(t *testing.T) {
 	allowed := []string{"http_request"}
 	args := `{"url":"` + srv.URL + `","method":"GET"}`
 	tc := llm.ToolCall{Type: "function", Function: llm.FunctionCall{Name: "http_request", Arguments: args}}
-	out := reg.ExecCall(ctx, tc, allowed, "", 4*time.Second, nil, nil)
+	out := reg.ExecCall(ctx, tc, allowed, "", 4*time.Second, toolResultModePersistOnOverflow, 64*1024, nil, nil)
 	if !out.Ok {
 		t.Fatalf("http_request failed: %s", out.ToolError)
 	}

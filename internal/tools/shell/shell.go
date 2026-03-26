@@ -1,7 +1,6 @@
 package shell
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -18,9 +17,17 @@ import (
 
 // Args описывает параметры вызова shell инструмента.
 type Args struct {
+	// Command — команда и её аргументы.
 	Command []string `json:"command"`
-	Workdir string   `json:"workdir,omitempty"`
-	Timeout time.Duration
+	// Workdir — рабочая директория выполнения.
+	Workdir string `json:"workdir,omitempty"`
+	// MaxCaptureBytes — максимальный объём stdout/stderr preview в памяти.
+	MaxCaptureBytes int
+	// PersistOverflow включает временный спилл полного вывода при переполнении preview.
+	PersistOverflow bool
+	// PersistAlways включает спилл полного вывода независимо от переполнения preview.
+	PersistAlways bool
+	Timeout       time.Duration
 }
 
 // Result — структурированный ответ инструмента.
@@ -31,6 +38,18 @@ type Result struct {
 	Blocked  bool
 	Message  string
 	Elapsed  time.Duration
+	// StdoutBytes и StderrBytes содержат размер полного вывода в байтах.
+	StdoutBytes int64
+	StderrBytes int64
+	// StdoutLines и StderrLines содержат число строк в полном выводе.
+	StdoutLines int64
+	StderrLines int64
+	// StdoutTruncated и StderrTruncated показывают, был ли preview усечён.
+	StdoutTruncated bool
+	StderrTruncated bool
+	// StdoutCapturePath и StderrCapturePath указывают временные файлы с полным выводом.
+	StdoutCapturePath string
+	StderrCapturePath string
 	// Отслеживание текущей директории (cd)
 	ChangedWorkdir bool
 	NewWorkdir     string
@@ -118,16 +137,31 @@ func Exec(ctx context.Context, args Args, approver *approval.ShellApprover) (Res
 		cmd.Dir = effectiveDir
 	}
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := newBoundedCollector(args.MaxCaptureBytes, args.PersistOverflow, args.PersistAlways)
+	defer func() {
+		_ = stdout.Close()
+	}()
+	stderr := newBoundedCollector(args.MaxCaptureBytes, args.PersistOverflow, args.PersistAlways)
+	defer func() {
+		_ = stderr.Close()
+	}()
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	err := cmd.Run()
 
 	res := Result{
-		Stdout:  stdout.String(),
-		Stderr:  stderr.String(),
-		Elapsed: time.Since(start),
+		Stdout:            stdout.Preview(),
+		Stderr:            stderr.Preview(),
+		Elapsed:           time.Since(start),
+		StdoutBytes:       stdout.totalBytes,
+		StderrBytes:       stderr.totalBytes,
+		StdoutLines:       stdout.totalLines,
+		StderrLines:       stderr.totalLines,
+		StdoutTruncated:   stdout.truncated,
+		StderrTruncated:   stderr.truncated,
+		StdoutCapturePath: stdout.CapturePath(),
+		StderrCapturePath: stderr.CapturePath(),
 	}
 	if err != nil {
 		var exitErr *exec.ExitError
