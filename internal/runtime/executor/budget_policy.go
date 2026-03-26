@@ -44,16 +44,16 @@ func enforceLLMLimits(step *dsl.Step, metrics *stepTokenMetrics) error {
 		return nil
 	}
 	if limit := positiveInt(step.LLM.MaxRequests); limit > 0 && metrics.Requests >= limit {
-		return fmt.Errorf("executor: llm request limit reached for step %s: %d/%d", step.ID, metrics.Requests, limit)
+		return handleBudgetLimit(metrics, fmt.Sprintf("executor: llm request limit reached for step %s: %d/%d", step.ID, metrics.Requests, limit))
 	}
 	if limit := positiveInt(step.LLM.MaxCumulativePromptTokens); limit > 0 && metrics.CumulativeUsage.PromptTokens >= limit {
-		return fmt.Errorf("executor: cumulative prompt token limit reached for step %s: %d/%d", step.ID, metrics.CumulativeUsage.PromptTokens, limit)
+		return handleBudgetLimit(metrics, fmt.Sprintf("executor: cumulative prompt token limit reached for step %s: %d/%d", step.ID, metrics.CumulativeUsage.PromptTokens, limit))
 	}
 	if limit := positiveInt(step.LLM.MaxCumulativeTotalTokens); limit > 0 && metrics.CumulativeUsage.TotalTokens >= limit {
-		return fmt.Errorf("executor: cumulative total token limit reached for step %s: %d/%d", step.ID, metrics.CumulativeUsage.TotalTokens, limit)
+		return handleBudgetLimit(metrics, fmt.Sprintf("executor: cumulative total token limit reached for step %s: %d/%d", step.ID, metrics.CumulativeUsage.TotalTokens, limit))
 	}
 	if limit := positiveInt(step.LLM.MaxCumulativeToolTokens); limit > 0 && metrics.CumulativeToolMessageTokens >= limit {
-		return fmt.Errorf("executor: cumulative tool transcript token limit reached for step %s: %d/%d", step.ID, metrics.CumulativeToolMessageTokens, limit)
+		return handleBudgetLimit(metrics, fmt.Sprintf("executor: cumulative tool transcript token limit reached for step %s: %d/%d", step.ID, metrics.CumulativeToolMessageTokens, limit))
 	}
 	return nil
 }
@@ -63,9 +63,26 @@ func enforceToolCallLimit(step *dsl.Step, metrics *stepTokenMetrics) error {
 		return nil
 	}
 	if limit := positiveInt(step.LLM.MaxToolCalls); limit > 0 && metrics.ToolCalls >= limit {
-		return fmt.Errorf("executor: tool call limit reached for step %s: %d/%d", step.ID, metrics.ToolCalls, limit)
+		return handleBudgetLimit(metrics, fmt.Sprintf("executor: tool call limit reached for step %s: %d/%d", step.ID, metrics.ToolCalls, limit))
 	}
 	return nil
+}
+
+func handleBudgetLimit(metrics *stepTokenMetrics, reason string) error {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return nil
+	}
+	if metrics == nil {
+		return fmt.Errorf("%s", reason)
+	}
+	switch metrics.BudgetMode {
+	case budgetModeWarn, budgetModeContinueWithCompaction:
+		metrics.recordBudgetWarning(reason)
+		return nil
+	default:
+		return fmt.Errorf("%s", reason)
+	}
 }
 
 func requestFitLimit(contextWindow, reserve int) int {

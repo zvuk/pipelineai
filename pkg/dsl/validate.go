@@ -27,6 +27,9 @@ func Validate(cfg *Config) error {
 	if strings.TrimSpace(cfg.Agent.ArtifactDir) == "" {
 		problems = append(problems, "agent.artifact_dir is required")
 	}
+	if mode := strings.TrimSpace(cfg.Agent.BudgetMode); mode != "" && !isAllowedBudgetMode(mode) {
+		problems = append(problems, fmt.Sprintf("agent.budget_mode has unsupported value %q", cfg.Agent.BudgetMode))
+	}
 	if cfg.Agent.ModelContextWindow != nil && *cfg.Agent.ModelContextWindow <= 0 {
 		problems = append(problems, "agent.model_context_window must be > 0")
 	}
@@ -52,6 +55,15 @@ func Validate(cfg *Config) error {
 	}
 	if cfg.Agent.ResponseReserveTokens != nil && *cfg.Agent.ResponseReserveTokens <= 0 {
 		problems = append(problems, "agent.response_reserve_tokens must be > 0")
+	}
+	if mode := strings.TrimSpace(cfg.Agent.ToolResultMode); mode != "" && !isAllowedToolResultMode(mode) {
+		problems = append(problems, fmt.Sprintf("agent.tool_result_mode has unsupported value %q", cfg.Agent.ToolResultMode))
+	}
+	if cfg.Agent.ToolResultPreviewTokens != nil && *cfg.Agent.ToolResultPreviewTokens <= 0 {
+		problems = append(problems, "agent.tool_result_preview_tokens must be > 0")
+	}
+	if cfg.Agent.ShellCaptureMaxBytes != nil && *cfg.Agent.ShellCaptureMaxBytes <= 0 {
+		problems = append(problems, "agent.shell_capture_max_bytes must be > 0")
 	}
 	if cfg.Agent.ToolOutputWarnPercent != nil && cfg.Agent.AutoCompactPercent != nil {
 		if *cfg.Agent.ToolOutputWarnPercent >= *cfg.Agent.AutoCompactPercent {
@@ -243,6 +255,18 @@ func validateLLMPolicy(path string, llm *StepLLM, problems *[]string) {
 		if item.value != nil && *item.value <= 0 {
 			*problems = append(*problems, fmt.Sprintf("%s.%s must be > 0", path, item.name))
 		}
+	}
+	if mode := strings.TrimSpace(llm.BudgetMode); mode != "" && !isAllowedBudgetMode(mode) {
+		*problems = append(*problems, fmt.Sprintf("%s.budget_mode has unsupported value %q", path, llm.BudgetMode))
+	}
+	if mode := strings.TrimSpace(llm.ToolResultMode); mode != "" && !isAllowedToolResultMode(mode) {
+		*problems = append(*problems, fmt.Sprintf("%s.tool_result_mode has unsupported value %q", path, llm.ToolResultMode))
+	}
+	if llm.ToolResultPreviewTokens != nil && *llm.ToolResultPreviewTokens <= 0 {
+		*problems = append(*problems, fmt.Sprintf("%s.tool_result_preview_tokens must be > 0", path))
+	}
+	if llm.ShellCaptureMaxBytes != nil && *llm.ShellCaptureMaxBytes <= 0 {
+		*problems = append(*problems, fmt.Sprintf("%s.shell_capture_max_bytes must be > 0", path))
 	}
 
 	validator := strings.TrimSpace(llm.ResponseValidator)
@@ -458,6 +482,24 @@ func validateApprovers(approvers []Approver, path string) error {
 		return fmt.Errorf("dsl: configuration errors in approvers:\n - %s", strings.Join(errs, "\n - "))
 	}
 	return nil
+}
+
+func isAllowedBudgetMode(mode string) bool {
+	switch strings.TrimSpace(mode) {
+	case "hard_stop", "warn", "continue_with_compaction":
+		return true
+	default:
+		return false
+	}
+}
+
+func isAllowedToolResultMode(mode string) bool {
+	switch strings.TrimSpace(mode) {
+	case "inline", "truncate", "persist_on_overflow", "persist_always":
+		return true
+	default:
+		return false
+	}
 }
 
 // validateFunctions проверяет корректность пользовательских функций в конфигурации DSL.

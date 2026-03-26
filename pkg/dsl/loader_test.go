@@ -26,12 +26,17 @@ agent:
   name: "pipelineai"
   model: "openai/gpt-oss-20b"
   artifact_dir: ".agent/artifacts"
+  budget_mode: "continue_with_compaction"
   model_context_window: 131072
   tool_output_warn_percent: 10
   tool_output_hard_cap_percent: 25
   auto_compact_percent: 85
   compact_target_percent: 60
   response_reserve_tokens: 4096
+  tool_result_mode: "persist_on_overflow"
+  tool_result_preview_tokens: 768
+  shell_capture_max_bytes: 262144
+  disable_inline_tool_call_fallback: true
   tokenizer_cache_dir: ".agent/cache/tokenizers"
   reasoning: true
   openai:
@@ -58,6 +63,9 @@ steps:
 	if cfg.Agent.ModelContextWindow == nil || *cfg.Agent.ModelContextWindow != 131072 {
 		t.Fatalf("model_context_window resolved incorrectly: %#v", cfg.Agent.ModelContextWindow)
 	}
+	if cfg.Agent.BudgetMode != "continue_with_compaction" {
+		t.Fatalf("budget_mode resolved incorrectly: %q", cfg.Agent.BudgetMode)
+	}
 	if cfg.Agent.ToolOutputWarnPercent == nil || *cfg.Agent.ToolOutputWarnPercent != 10 {
 		t.Fatalf("tool_output_warn_percent resolved incorrectly: %#v", cfg.Agent.ToolOutputWarnPercent)
 	}
@@ -72,6 +80,18 @@ steps:
 	}
 	if cfg.Agent.ResponseReserveTokens == nil || *cfg.Agent.ResponseReserveTokens != 4096 {
 		t.Fatalf("response_reserve_tokens resolved incorrectly: %#v", cfg.Agent.ResponseReserveTokens)
+	}
+	if cfg.Agent.ToolResultMode != "persist_on_overflow" {
+		t.Fatalf("tool_result_mode resolved incorrectly: %q", cfg.Agent.ToolResultMode)
+	}
+	if cfg.Agent.ToolResultPreviewTokens == nil || *cfg.Agent.ToolResultPreviewTokens != 768 {
+		t.Fatalf("tool_result_preview_tokens resolved incorrectly: %#v", cfg.Agent.ToolResultPreviewTokens)
+	}
+	if cfg.Agent.ShellCaptureMaxBytes == nil || *cfg.Agent.ShellCaptureMaxBytes != 262144 {
+		t.Fatalf("shell_capture_max_bytes resolved incorrectly: %#v", cfg.Agent.ShellCaptureMaxBytes)
+	}
+	if !cfg.Agent.DisableInlineToolCallFallback {
+		t.Fatal("expected disable_inline_tool_call_fallback=true to be preserved")
 	}
 	if cfg.Agent.TokenizerCacheDir != ".agent/cache/tokenizers" {
 		t.Fatalf("tokenizer_cache_dir resolved incorrectly: %q", cfg.Agent.TokenizerCacheDir)
@@ -132,4 +152,46 @@ func TestValidate_DuplicateSteps(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for duplicate step")
 	}
+}
+
+func TestValidate_InvalidRuntimePolicies(t *testing.T) {
+	cfg := &Config{
+		Version: 1,
+		Agent: Agent{
+			Name:                    "a",
+			Model:                   "m",
+			ArtifactDir:             ".agent",
+			BudgetMode:              "broken",
+			ToolResultMode:          "invalid",
+			ToolResultPreviewTokens: intPtrValue(0),
+			ShellCaptureMaxBytes:    intPtrValue(-1),
+			OpenAI: AgentOpenAI{
+				BaseURL:   "http://localhost",
+				APIKeyEnv: "KEY",
+			},
+		},
+		Steps: []Step{
+			{
+				ID:   "one",
+				Type: "llm",
+				LLM: &StepLLM{
+					SystemPrompt:            TemplateString{raw: "a"},
+					UserPrompt:              TemplateString{raw: "b"},
+					BudgetMode:              "nope",
+					ToolResultMode:          "bad",
+					ToolResultPreviewTokens: intPtrValue(0),
+					ShellCaptureMaxBytes:    intPtrValue(0),
+				},
+			},
+		},
+	}
+
+	err := Validate(cfg)
+	if err == nil {
+		t.Fatal("expected error for invalid runtime policy settings")
+	}
+}
+
+func intPtrValue(v int) *int {
+	return &v
 }

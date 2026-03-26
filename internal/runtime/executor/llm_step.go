@@ -13,6 +13,7 @@ import (
 	"github.com/zvuk/pipelineai/internal/runtime/llm"
 	"github.com/zvuk/pipelineai/internal/tools/approval"
 	"github.com/zvuk/pipelineai/internal/tools/prompts"
+	"github.com/zvuk/pipelineai/internal/tools/registry"
 	"github.com/zvuk/pipelineai/pkg/dsl"
 )
 
@@ -81,7 +82,7 @@ func (e *Executor) RunLLMStep(ctx context.Context, stepID string, extra map[stri
 	// ---
 
 	profile := e.tokenizer.ResolveModel(e.cfg.Agent.Model, e.cfg.Agent.ModelContextWindow)
-	tokenMetrics := newStepTokenMetrics(e.cfg, profile)
+	tokenMetrics := newStepTokenMetrics(e.cfg, &step, profile)
 	resp, finalMessages, err := e.runAgentLoop(ctx, req, &step, toolTimeout, shellAppr, applyAppr, tokenMetrics)
 	if err != nil {
 		record, _ := buildLLMErrorArtifactRecord(systemPrompt, userPrompt, resp, finalMessages, tokenMetrics, err)
@@ -126,9 +127,12 @@ func (e *Executor) runAgentLoop(ctx context.Context, req llm.ChatCompletionReque
 	lastToolSigs := make([]string, 0, 3)
 	// Текущая рабочая директория для инструментов (обновляется shell.cd)
 	currentWorkdir := ""
+	toolResultMode := resolveToolResultMode(e.cfg, step)
+	shellCaptureMaxBytes := resolveShellCaptureMaxBytes(e.cfg, step)
+	disableInlineFallback := resolveDisableInlineToolCallFallback(e.cfg, step)
+	toolResultCache := make(map[string]registry.ExecResult)
 	profile := e.tokenizer.ResolveModel(e.cfg.Agent.Model, e.cfg.Agent.ModelContextWindow)
 	tracker := newPromptTokenTracker(e.tokenizer, profile, req)
-	warnedLargeOutputs := make(map[string]struct{})
 	tokenMetrics.syncTracker(tracker)
 	for {
 		if err := enforceLLMLimits(step, tokenMetrics); err != nil {
@@ -199,7 +203,7 @@ func (e *Executor) runAgentLoop(ctx context.Context, req llm.ChatCompletionReque
 			// Выполняем строго один tool_call за итерацию, чтобы история была:
 			// assistant(tool_calls[1]) -> tool -> (следующая итерация)
 			tc := choice.Message.ToolCalls[0]
-			sanitizedTC, forceFullOutput, largeOutputSig := sanitizeToolCallForExecution(tc)
+			sanitizedTC, forceFullOutput, _ := sanitizeToolCallForExecution(tc)
 			// Сохраняем сообщение ассистента, но с одиночным вызовом
 			assistantMsg := llm.Message{Role: llm.RoleAssistant, Content: choice.Message.Content, ToolCalls: []llm.ToolCall{sanitizedTC}}
 			req.Messages = append(req.Messages, assistantMsg)
@@ -207,11 +211,20 @@ func (e *Executor) runAgentLoop(ctx context.Context, req llm.ChatCompletionReque
 			// INFO: вызов инструмента (имя, параметры обрезанные)
 			argsShort := crop(strings.TrimSpace(sanitizedTC.Function.Arguments), 90)
 			e.log.InfoContext(ctx, "tool call", slog.String("step", step.ID), slog.String("tool", sanitizedTC.Function.Name), slog.String("args", argsShort))
-			out := e.tools.ExecCall(ctx, sanitizedTC, step.LLM.ToolsAllowed, currentWorkdir, toolTimeout, shellAppr, applyAppr)
+			cacheKey := buildToolResultCacheKey(sanitizedTC, currentWorkdir)
+			out, cached := toolResultCache[cacheKey]
+			if !cached {
+				out = e.tools.ExecCall(ctx, sanitizedTC, step.LLM.ToolsAllowed, currentWorkdir, toolTimeout, toolResultMode, shellCaptureMaxBytes, shellAppr, applyAppr)
+				out = e.applyToolOutputPolicy(step.ID, step, sanitizedTC, out, forceFullOutput, tracker, tokenMetrics)
+				if shouldCacheToolResult(out) {
+					toolResultCache[cacheKey] = out
+				}
+			} else {
+				tokenMetrics.recordBudgetWarning(fmt.Sprintf("executor: reused cached tool result for %s", strings.TrimSpace(sanitizedTC.Function.Name)))
+			}
 			if out.NewWorkdir != "" {
 				currentWorkdir = out.NewWorkdir
 			}
-			out = e.applyToolOutputPolicy(step.ID, sanitizedTC, out, forceFullOutput, largeOutputSig, warnedLargeOutputs, tokenMetrics)
 			tokenMetrics.ToolCalls++
 			// Ответ инструмента
 			payload, _ := json.Marshal(out)
@@ -250,7 +263,7 @@ func (e *Executor) runAgentLoop(ctx context.Context, req llm.ChatCompletionReque
 				return last, req.Messages, err
 			}
 			tc := llm.ToolCall{ID: "fc_0", Type: "function", Function: *choice.Message.FunctionCall}
-			sanitizedTC, forceFullOutput, largeOutputSig := sanitizeToolCallForExecution(tc)
+			sanitizedTC, forceFullOutput, _ := sanitizeToolCallForExecution(tc)
 			fnCall := &llm.FunctionCall{Name: sanitizedTC.Function.Name, Arguments: sanitizedTC.Function.Arguments}
 			assistantMsg := llm.Message{Role: llm.RoleAssistant, Content: choice.Message.Content, FunctionCall: fnCall}
 			req.Messages = append(req.Messages, assistantMsg)
@@ -258,11 +271,20 @@ func (e *Executor) runAgentLoop(ctx context.Context, req llm.ChatCompletionReque
 			// Выполним вызов
 			argsShort := crop(strings.TrimSpace(sanitizedTC.Function.Arguments), 90)
 			e.log.InfoContext(ctx, "tool call", slog.String("step", step.ID), slog.String("tool", sanitizedTC.Function.Name), slog.String("args", argsShort))
-			out := e.tools.ExecCall(ctx, sanitizedTC, step.LLM.ToolsAllowed, currentWorkdir, toolTimeout, shellAppr, applyAppr)
+			cacheKey := buildToolResultCacheKey(sanitizedTC, currentWorkdir)
+			out, cached := toolResultCache[cacheKey]
+			if !cached {
+				out = e.tools.ExecCall(ctx, sanitizedTC, step.LLM.ToolsAllowed, currentWorkdir, toolTimeout, toolResultMode, shellCaptureMaxBytes, shellAppr, applyAppr)
+				out = e.applyToolOutputPolicy(step.ID, step, sanitizedTC, out, forceFullOutput, tracker, tokenMetrics)
+				if shouldCacheToolResult(out) {
+					toolResultCache[cacheKey] = out
+				}
+			} else {
+				tokenMetrics.recordBudgetWarning(fmt.Sprintf("executor: reused cached tool result for %s", strings.TrimSpace(sanitizedTC.Function.Name)))
+			}
 			if out.NewWorkdir != "" {
 				currentWorkdir = out.NewWorkdir
 			}
-			out = e.applyToolOutputPolicy(step.ID, sanitizedTC, out, forceFullOutput, largeOutputSig, warnedLargeOutputs, tokenMetrics)
 			tokenMetrics.ToolCalls++
 			payload, _ := json.Marshal(out)
 			toolMsg := llm.Message{Role: llm.RoleTool, Content: string(payload), ToolCallID: "fc_0"}
@@ -276,35 +298,47 @@ func (e *Executor) runAgentLoop(ctx context.Context, req llm.ChatCompletionReque
 			continue
 		default:
 			// Попытка распознать inline-вызов инструмента в content (fallback для моделей без tool_calls)
-			if name, args := tryExtractInlineToolCall(choice.Message.Content); name != "" {
-				assistantMsg := llm.Message{Role: llm.RoleAssistant, Content: choice.Message.Content}
-				req.Messages = append(req.Messages, assistantMsg)
-				tracker.AppendMessage(assistantMsg)
-				tc := llm.ToolCall{ID: "inline_0", Type: "function", Function: llm.FunctionCall{Name: name, Arguments: args}}
-				if err := enforceToolCallLimit(step, tokenMetrics); err != nil {
-					tokenMetrics.recordBudgetExceeded(err.Error())
-					return last, req.Messages, err
+			if !disableInlineFallback {
+				if name, args := tryExtractInlineToolCall(choice.Message.Content); name != "" {
+					tokenMetrics.recordInlineFallback()
+					assistantMsg := llm.Message{Role: llm.RoleAssistant, Content: choice.Message.Content}
+					req.Messages = append(req.Messages, assistantMsg)
+					tracker.AppendMessage(assistantMsg)
+					tc := llm.ToolCall{ID: "inline_0", Type: "function", Function: llm.FunctionCall{Name: name, Arguments: args}}
+					if err := enforceToolCallLimit(step, tokenMetrics); err != nil {
+						tokenMetrics.recordBudgetExceeded(err.Error())
+						return last, req.Messages, err
+					}
+					sanitizedTC, forceFullOutput, _ := sanitizeToolCallForExecution(tc)
+					argsShort := crop(strings.TrimSpace(sanitizedTC.Function.Arguments), 90)
+					e.log.InfoContext(ctx, "tool call", slog.String("step", step.ID), slog.String("tool", sanitizedTC.Function.Name), slog.String("args", argsShort))
+					cacheKey := buildToolResultCacheKey(sanitizedTC, currentWorkdir)
+					out, cached := toolResultCache[cacheKey]
+					if !cached {
+						out = e.tools.ExecCall(ctx, sanitizedTC, step.LLM.ToolsAllowed, currentWorkdir, toolTimeout, toolResultMode, shellCaptureMaxBytes, shellAppr, applyAppr)
+						out = e.applyToolOutputPolicy(step.ID, step, sanitizedTC, out, forceFullOutput, tracker, tokenMetrics)
+						if shouldCacheToolResult(out) {
+							toolResultCache[cacheKey] = out
+						}
+					} else {
+						tokenMetrics.recordBudgetWarning(fmt.Sprintf("executor: reused cached tool result for %s", strings.TrimSpace(sanitizedTC.Function.Name)))
+					}
+					if out.NewWorkdir != "" {
+						currentWorkdir = out.NewWorkdir
+					}
+					tokenMetrics.ToolCalls++
+					payload, _ := json.Marshal(out)
+					toolMsg := llm.Message{Role: llm.RoleTool, Content: string(payload), ToolCallID: sanitizedTC.ID}
+					req.Messages = append(req.Messages, toolMsg)
+					tokenMetrics.recordToolMessageTokens(tracker.AppendMessage(toolMsg))
+					if err := enforceLLMLimits(step, tokenMetrics); err != nil {
+						tokenMetrics.recordBudgetExceeded(err.Error())
+						return last, req.Messages, err
+					}
+					// Продолжим диалог
+					e.logToolExecution(ctx, step.ID, sanitizedTC.Function.Name, sanitizedTC.Function.Arguments, out.Ok, out.ToolError, out.ExitCode, out.Stderr, out.Stdout)
+					continue
 				}
-				sanitizedTC, forceFullOutput, largeOutputSig := sanitizeToolCallForExecution(tc)
-				argsShort := crop(strings.TrimSpace(sanitizedTC.Function.Arguments), 90)
-				e.log.InfoContext(ctx, "tool call", slog.String("step", step.ID), slog.String("tool", sanitizedTC.Function.Name), slog.String("args", argsShort))
-				out := e.tools.ExecCall(ctx, sanitizedTC, step.LLM.ToolsAllowed, currentWorkdir, toolTimeout, shellAppr, applyAppr)
-				if out.NewWorkdir != "" {
-					currentWorkdir = out.NewWorkdir
-				}
-				out = e.applyToolOutputPolicy(step.ID, sanitizedTC, out, forceFullOutput, largeOutputSig, warnedLargeOutputs, tokenMetrics)
-				tokenMetrics.ToolCalls++
-				payload, _ := json.Marshal(out)
-				toolMsg := llm.Message{Role: llm.RoleTool, Content: string(payload), ToolCallID: sanitizedTC.ID}
-				req.Messages = append(req.Messages, toolMsg)
-				tokenMetrics.recordToolMessageTokens(tracker.AppendMessage(toolMsg))
-				if err := enforceLLMLimits(step, tokenMetrics); err != nil {
-					tokenMetrics.recordBudgetExceeded(err.Error())
-					return last, req.Messages, err
-				}
-				// Продолжим диалог
-				e.logToolExecution(ctx, step.ID, sanitizedTC.Function.Name, sanitizedTC.Function.Arguments, out.Ok, out.ToolError, out.ExitCode, out.Stderr, out.Stdout)
-				continue
 			}
 			// Финальный ответ (нет вызовов tool/function) — сохраняем ответ ассистента
 			assistantMsg := llm.Message{Role: llm.RoleAssistant, Content: choice.Message.Content}
@@ -373,6 +407,14 @@ func buildToolCallSignature(msg llm.Message) string {
 	return ""
 }
 
+func buildToolResultCacheKey(tc llm.ToolCall, workdir string) string {
+	return strings.TrimSpace(tc.Function.Name) + "|" + strings.TrimSpace(tc.Function.Arguments) + "|" + strings.TrimSpace(workdir)
+}
+
+func shouldCacheToolResult(out registry.ExecResult) bool {
+	return out.Suppressed || out.CapturePersisted
+}
+
 // tryExtractInlineToolCall пытается вытащить вызов инструмента из content вида:
 // "shell {"command":[...]}" или "apply_patch {"input":"*** Begin Patch..."}"
 func tryExtractInlineToolCall(content string) (string, string) {
@@ -380,39 +422,37 @@ func tryExtractInlineToolCall(content string) (string, string) {
 	if s == "" {
 		return "", ""
 	}
-	// Поиск маркера имени инструмента
 	for _, name := range []string{"shell", "apply_patch", "repo_browser.exec"} {
-		idx := strings.Index(s, name)
-		if idx >= 0 {
-			rest := s[idx+len(name):]
-			br := strings.Index(rest, "{")
-			if br < 0 {
-				continue
+		if !strings.HasPrefix(s, name) {
+			continue
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(s, name))
+		if rest == "" || !strings.HasPrefix(rest, "{") {
+			continue
+		}
+		// Выделим JSON-объект по балансировке скобок.
+		level := 0
+		end := -1
+		for i, ch := range rest {
+			if ch == '{' {
+				level++
 			}
-			obj := rest[br:]
-			// Выделим JSON-объект по балансировке скобок
-			level := 0
-			end := -1
-			for i, ch := range obj {
-				if ch == '{' {
-					level++
+			if ch == '}' {
+				level--
+				if level == 0 {
+					end = i
+					break
 				}
-				if ch == '}' {
-					level--
-					if level == 0 {
-						end = i
-						break
-					}
-				}
-			}
-			if end > 0 {
-				jsonPart := obj[:end+1]
-				if name == "repo_browser.exec" {
-					return "shell", jsonPart
-				}
-				return name, jsonPart
 			}
 		}
+		if end <= 0 {
+			continue
+		}
+		jsonPart := rest[:end+1]
+		if name == "repo_browser.exec" {
+			return "shell", jsonPart
+		}
+		return name, jsonPart
 	}
 	return "", ""
 }

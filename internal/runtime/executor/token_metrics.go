@@ -14,12 +14,17 @@ type stepTokenMetrics struct {
 	ToolCalls                   int       `json:"tool_calls"`
 	ToolWarnings                int       `json:"tool_warnings"`
 	ToolHardCapSuppressions     int       `json:"tool_hard_cap_suppressions"`
+	ToolCaptures                int       `json:"tool_captures"`
 	ModelContextWindow          int       `json:"model_context_window"`
 	AutoCompactThreshold        int       `json:"auto_compact_threshold_tokens"`
 	CompactTargetTokens         int       `json:"compact_target_tokens"`
 	ToolWarnThreshold           int       `json:"tool_warn_threshold_tokens"`
 	ToolHardCapThreshold        int       `json:"tool_hard_cap_threshold_tokens"`
 	ResponseReserveTokens       int       `json:"response_reserve_tokens"`
+	BudgetMode                  string    `json:"budget_mode,omitempty"`
+	ToolResultMode              string    `json:"tool_result_mode,omitempty"`
+	ToolResultPreviewTokens     int       `json:"tool_result_preview_tokens,omitempty"`
+	ShellCaptureMaxBytes        int       `json:"shell_capture_max_bytes,omitempty"`
 	LastPromptTokens            int       `json:"last_prompt_tokens"`
 	EstimatedNextPromptTokens   int       `json:"estimated_next_prompt_tokens"`
 	LastEstimateExact           bool      `json:"last_estimate_exact"`
@@ -31,19 +36,26 @@ type stepTokenMetrics struct {
 	LargestMessageRole          string    `json:"largest_message_role,omitempty"`
 	LargestMessageOrdinal       int       `json:"largest_message_ordinal,omitempty"`
 	BudgetExceededReason        string    `json:"budget_exceeded_reason,omitempty"`
+	BudgetWarnings              []string  `json:"budget_warnings,omitempty"`
+	CaptureRefs                 []string  `json:"capture_refs,omitempty"`
+	InlineToolCallFallbackUsed  bool      `json:"inline_tool_call_fallback_used,omitempty"`
 	CumulativeUsage             llm.Usage `json:"cumulative_usage"`
 	FinalResponseUsage          llm.Usage `json:"final_response_usage"`
 }
 
-func newStepTokenMetrics(cfg *dsl.Config, profile tokens.ModelProfile) *stepTokenMetrics {
+func newStepTokenMetrics(cfg *dsl.Config, step *dsl.Step, profile tokens.ModelProfile) *stepTokenMetrics {
 	window := profile.ContextWindow
 	return &stepTokenMetrics{
-		ModelContextWindow:    window,
-		AutoCompactThreshold:  thresholdTokens(window, autoCompactPercent(cfg)),
-		CompactTargetTokens:   thresholdTokens(window, compactTargetPercent(cfg)),
-		ToolWarnThreshold:     thresholdTokens(window, toolWarnPercent(cfg)),
-		ToolHardCapThreshold:  thresholdTokens(window, toolHardCapPercent(cfg)),
-		ResponseReserveTokens: responseReserveTokens(cfg),
+		ModelContextWindow:      window,
+		AutoCompactThreshold:    thresholdTokens(window, autoCompactPercent(cfg)),
+		CompactTargetTokens:     thresholdTokens(window, compactTargetPercent(cfg)),
+		ToolWarnThreshold:       thresholdTokens(window, toolWarnPercent(cfg)),
+		ToolHardCapThreshold:    thresholdTokens(window, toolHardCapPercent(cfg)),
+		ResponseReserveTokens:   responseReserveTokens(cfg),
+		BudgetMode:              resolveBudgetMode(cfg, step),
+		ToolResultMode:          resolveToolResultMode(cfg, step),
+		ToolResultPreviewTokens: resolveToolResultPreviewTokens(cfg, step),
+		ShellCaptureMaxBytes:    resolveShellCaptureMaxBytes(cfg, step),
 	}
 }
 
@@ -83,6 +95,27 @@ func (m *stepTokenMetrics) recordBudgetExceeded(reason string) {
 		return
 	}
 	m.BudgetExceededReason = reason
+}
+
+func (m *stepTokenMetrics) recordBudgetWarning(reason string) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return
+	}
+	m.BudgetWarnings = appendUniqueString(m.BudgetWarnings, reason)
+}
+
+func (m *stepTokenMetrics) recordToolCapture(path string) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return
+	}
+	m.ToolCaptures++
+	m.CaptureRefs = appendUniqueString(m.CaptureRefs, path)
+}
+
+func (m *stepTokenMetrics) recordInlineFallback() {
+	m.InlineToolCallFallbackUsed = true
 }
 
 func (m *stepTokenMetrics) syncTracker(tracker *promptTokenTracker) {
@@ -239,41 +272,6 @@ func (t *promptTokenTracker) observeMessageEstimate(msg llm.Message, estimate to
 	t.largestMessageTokens = estimate.Tokens
 	t.largestMessageRole = msg.Role
 	t.largestMessageOrdinal = t.nextMessageOrdinal
-}
-
-func toolWarnPercent(cfg *dsl.Config) int {
-	if cfg != nil && cfg.Agent.ToolOutputWarnPercent != nil && *cfg.Agent.ToolOutputWarnPercent > 0 {
-		return *cfg.Agent.ToolOutputWarnPercent
-	}
-	return tokens.DefaultToolWarnPercent
-}
-
-func toolHardCapPercent(cfg *dsl.Config) int {
-	if cfg != nil && cfg.Agent.ToolOutputHardCapPercent != nil && *cfg.Agent.ToolOutputHardCapPercent > 0 {
-		return *cfg.Agent.ToolOutputHardCapPercent
-	}
-	return tokens.DefaultToolHardCapPercent
-}
-
-func autoCompactPercent(cfg *dsl.Config) int {
-	if cfg != nil && cfg.Agent.AutoCompactPercent != nil && *cfg.Agent.AutoCompactPercent > 0 {
-		return *cfg.Agent.AutoCompactPercent
-	}
-	return tokens.DefaultAutoCompactPercent
-}
-
-func compactTargetPercent(cfg *dsl.Config) int {
-	if cfg != nil && cfg.Agent.CompactTargetPercent != nil && *cfg.Agent.CompactTargetPercent > 0 {
-		return *cfg.Agent.CompactTargetPercent
-	}
-	return tokens.DefaultCompactTargetPercent
-}
-
-func responseReserveTokens(cfg *dsl.Config) int {
-	if cfg != nil && cfg.Agent.ResponseReserveTokens != nil && *cfg.Agent.ResponseReserveTokens > 0 {
-		return *cfg.Agent.ResponseReserveTokens
-	}
-	return tokens.DefaultResponseReserveTokens
 }
 
 func thresholdTokens(contextWindow, percent int) int {

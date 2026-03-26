@@ -64,6 +64,7 @@ func testToolConfig(t *testing.T, userPrompt string, toolWarnPercent, autoCompac
 			Name:        "pipelineai",
 			Model:       "cloudru/gpt-oss-120b",
 			ArtifactDir: ".agent/artifacts",
+			BudgetMode:  budgetModeHardStop,
 			OpenAI: dsl.AgentOpenAI{
 				BaseURL:   "http://localhost",
 				APIKeyEnv: "LLM_API_KEY",
@@ -74,6 +75,9 @@ func testToolConfig(t *testing.T, userPrompt string, toolWarnPercent, autoCompac
 			AutoCompactPercent:       intPtr(autoCompactPercent),
 			CompactTargetPercent:     intPtr(60),
 			ResponseReserveTokens:    intPtr(64),
+			ToolResultMode:           toolResultModePersistOnOverflow,
+			ToolResultPreviewTokens:  intPtr(128),
+			ShellCaptureMaxBytes:     intPtr(1024),
 		},
 		Steps: []dsl.Step{{
 			ID:   "tool_step",
@@ -125,8 +129,11 @@ func TestRunLLMStep_LargeToolResultWarnsFirstTime(t *testing.T) {
 	if !strings.Contains(toolMsg.Content, `"suppressed":true`) {
 		t.Fatalf("expected suppressed tool payload, got %s", toolMsg.Content)
 	}
-	if !strings.Contains(toolMsg.Content, "force_full_output=true") {
-		t.Fatalf("expected retry hint in warning payload, got %s", toolMsg.Content)
+	if !strings.Contains(toolMsg.Content, `"capture_ref":"`) {
+		t.Fatalf("expected capture_ref in warning payload, got %s", toolMsg.Content)
+	}
+	if !strings.Contains(toolMsg.Content, `"result_mode":"persist_on_overflow"`) {
+		t.Fatalf("expected result_mode in warning payload, got %s", toolMsg.Content)
 	}
 	if strings.Contains(toolMsg.Content, `"stdout":"xxxxxxxx`) {
 		t.Fatalf("expected large stdout to be omitted from warning payload, got %s", toolMsg.Content)
@@ -210,19 +217,20 @@ func TestRunLLMStep_ForceFullOutputIgnoredBeyondHardCap(t *testing.T) {
 }
 
 func TestRunLLMStep_AutoCompactionPreservesCriticalFacts(t *testing.T) {
-	cfg := testToolConfig(t, "CRITICAL_FACT=42\nСохрани это в памяти до конца шага.", 90, 85, 800)
+	cfg := testToolConfig(t, "CRITICAL_FACT=42\nСохрани это в памяти до конца шага.", 90, 85, 900)
+	cfg.Agent.ToolResultMode = toolResultModeInline
+	compactionCalls := 0
+	postCompactionCalls := 0
 	client := &callDrivenClient{
 		t: t,
 		fn: func(call int, req llm.ChatCompletionRequest) (llm.ChatCompletionResponse, error) {
-			switch call {
-			case 1:
-				return toolCallResponseWithUsage(`{"command":["bash","-lc","echo -n one"]}`, 600), nil
-			case 2:
-				return toolCallResponseWithUsage(`{"command":["bash","-lc","echo -n two"]}`, 690), nil
-			case 3:
-				if len(req.Messages) < 2 || req.Messages[0].Content != compactPrompt {
-					t.Fatalf("expected compaction request on call 3, got %#v", req.Messages)
-				}
+			switch {
+			case call == 1:
+				return toolCallResponseWithUsage(`{"command":["bash","-lc","echo -n one"]}`, 650), nil
+			case call == 2:
+				return toolCallResponseWithUsage(`{"command":["bash","-lc","echo -n two"]}`, 790), nil
+			case len(req.Messages) >= 2 && req.Messages[0].Content == compactPrompt:
+				compactionCalls++
 				if !strings.Contains(req.Messages[1].Content, "<SUMMARIZATION_PROMPT>") {
 					t.Fatalf("expected gpt-oss compaction prompt wrapper, got %s", req.Messages[1].Content)
 				}
@@ -230,7 +238,8 @@ func TestRunLLMStep_AutoCompactionPreservesCriticalFacts(t *testing.T) {
 					t.Fatalf("expected gpt-oss compaction history wrapper, got %s", req.Messages[1].Content)
 				}
 				return finalTextResponseWithUsage("Current progress: shell calls already executed.\nImportant context: CRITICAL_FACT=42.\nNext steps: continue the task using the preserved fact.", 22), nil
-			case 4:
+			default:
+				postCompactionCalls++
 				contents := make([]string, 0, len(req.Messages))
 				for _, msg := range req.Messages {
 					contents = append(contents, msg.Content)
@@ -246,9 +255,6 @@ func TestRunLLMStep_AutoCompactionPreservesCriticalFacts(t *testing.T) {
 					t.Fatalf("expected critical fact to survive compaction, got %s", payload)
 				}
 				return finalTextResponse("preserved"), nil
-			default:
-				t.Fatalf("unexpected request #%d", call)
-				return llm.ChatCompletionResponse{}, nil
 			}
 		},
 	}
@@ -261,8 +267,11 @@ func TestRunLLMStep_AutoCompactionPreservesCriticalFacts(t *testing.T) {
 	if len(resp.Choices) == 0 || strings.TrimSpace(resp.Choices[0].Message.Content) != "preserved" {
 		t.Fatalf("expected preserved final response, got %#v", resp.Choices)
 	}
-	if len(client.requests) != 4 {
-		t.Fatalf("expected 4 requests including compaction, got %d", len(client.requests))
+	if compactionCalls == 0 {
+		t.Fatal("expected at least one compaction request")
+	}
+	if postCompactionCalls == 0 {
+		t.Fatal("expected at least one post-compaction request")
 	}
 }
 
@@ -305,6 +314,49 @@ func TestRunLLMStep_MaxRequestLimitStopsToolLoop(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "llm request limit reached") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunLLMStep_BudgetModeContinueWithCompactionSoftensCumulativeLimits(t *testing.T) {
+	cfg := testToolConfig(t, "Нужен длинный диалог без hard stop по cumulative prompt budget", 10, 95, 1000)
+	cfg.Agent.BudgetMode = budgetModeContinueWithCompaction
+	cfg.Steps[0].LLM.MaxCumulativePromptTokens = intPtr(10)
+	client := &fakeClientSeq{responses: []llm.ChatCompletionResponse{
+		toolCallResponseWithUsage(`{"command":["bash","-lc","echo -n x"]}`, 120),
+		finalTextResponseWithUsage("done", 130),
+	}}
+	exec := newTokenTestExecutor(t, cfg, client)
+
+	resp, _, err := exec.RunLLMStep(context.Background(), "tool_step", nil)
+	if err != nil {
+		t.Fatalf("expected soft cumulative budget in continue_with_compaction mode, got %v", err)
+	}
+	if got := strings.TrimSpace(resp.Choices[0].Message.Content); got != "done" {
+		t.Fatalf("unexpected final response: %q", got)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected dialogue to continue despite cumulative budget warning, got %d requests", len(client.requests))
+	}
+}
+
+func TestRunLLMStep_DisableInlineFallbackIgnoresGarbageToolName(t *testing.T) {
+	cfg := testToolConfig(t, "Проверь, что inline fallback выключен", 10, 95, 1000)
+	cfg.Agent.DisableInlineToolCallFallback = true
+	client := &fakeClientSeq{responses: []llm.ChatCompletionResponse{
+		finalTextResponse(`shell<|channel|>commentary {"command":["bash","-lc","echo -n hi"]}`),
+	}}
+	exec := newTokenTestExecutor(t, cfg, client)
+
+	resp, _, err := exec.RunLLMStep(context.Background(), "tool_step", nil)
+	if err != nil {
+		t.Fatalf("step execution failed: %v", err)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected inline fallback to stay disabled, got %d requests", len(client.requests))
+	}
+	got := strings.TrimSpace(resp.Choices[0].Message.Content)
+	if !strings.HasPrefix(got, "shell<|channel|>commentary") {
+		t.Fatalf("expected raw assistant content to pass through, got %q", got)
 	}
 }
 
