@@ -47,7 +47,7 @@ func TestValidateReviewFileResponseAcceptsSuccessfulInlineNote(t *testing.T) {
 		{
 			Role:       llm.RoleTool,
 			ToolCallID: "tool_1",
-			Content:    `{"tool":"gitlab_create_inline_draft_note","ok":true,"stdout":"","stderr":"","exit_code":0,"elapsed_ms":1}`,
+			Content:    `{"tool":"gitlab_create_inline_draft_note","ok":true,"stdout":"{\"status\":\"ok\",\"created\":true}","stderr":"","exit_code":0,"elapsed_ms":1}`,
 		},
 	}
 	err := validateReviewFileResponse(resp, messages, map[string]any{
@@ -58,5 +58,87 @@ func TestValidateReviewFileResponseAcceptsSuccessfulInlineNote(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("expected validator to accept successful inline note, got %v", err)
+	}
+}
+
+func TestValidateReviewFileResponseRejectsDuplicateInlineAnchor(t *testing.T) {
+	resp := finalTextResponse("Созданы inline-комментарии")
+	messages := []llm.Message{
+		{
+			Role: llm.RoleAssistant,
+			ToolCalls: []llm.ToolCall{
+				{
+					ID:   "tool_1",
+					Type: "function",
+					Function: llm.FunctionCall{
+						Name:      "gitlab_create_inline_draft_note",
+						Arguments: `{"file_path":"deployments/docker-compose.yml","line":90,"body":"⚠️ первый"}`,
+					},
+				},
+				{
+					ID:   "tool_2",
+					Type: "function",
+					Function: llm.FunctionCall{
+						Name:      "gitlab_create_inline_draft_note",
+						Arguments: `{"file_path":"deployments/docker-compose.yml","line":90,"body":"⚠️ второй"}`,
+					},
+				},
+			},
+		},
+		{
+			Role:       llm.RoleTool,
+			ToolCallID: "tool_1",
+			Content:    `{"tool":"gitlab_create_inline_draft_note","ok":true,"stdout":"{\"status\":\"ok\",\"created\":true}","stderr":"","exit_code":0,"elapsed_ms":1}`,
+		},
+		{
+			Role:       llm.RoleTool,
+			ToolCallID: "tool_2",
+			Content:    `{"tool":"gitlab_create_inline_draft_note","ok":true,"stdout":"{\"status\":\"ok\",\"created\":true}","stderr":"","exit_code":0,"elapsed_ms":1}`,
+		},
+	}
+
+	err := validateReviewFileResponse(resp, messages, map[string]any{
+		"matrix": map[string]any{
+			"file_path":      "deployments/docker-compose.yml",
+			"file_paths_csv": "deployments/docker-compose.yml",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected validator to reject duplicate inline note anchor")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "duplicate inline note") {
+		t.Fatalf("unexpected validator error: %v", err)
+	}
+}
+
+func TestValidateReviewFileResponseAcceptsDeduplicatedInlineNote(t *testing.T) {
+	resp := finalTextResponse("Комментарий уже существует в текущем прогоне")
+	messages := []llm.Message{
+		{
+			Role: llm.RoleAssistant,
+			ToolCalls: []llm.ToolCall{{
+				ID:   "tool_1",
+				Type: "function",
+				Function: llm.FunctionCall{
+					Name:      "gitlab_create_inline_draft_note",
+					Arguments: `{"file_path":"deployments/docker-compose.yml","line":90,"body":"⚠️ пример"}`,
+				},
+			}},
+		},
+		{
+			Role:       llm.RoleTool,
+			ToolCallID: "tool_1",
+			Content:    `{"tool":"gitlab_create_inline_draft_note","ok":true,"stdout":"{\"status\":\"ok\",\"created\":false,\"deduplicated\":true}","stderr":"","exit_code":0,"elapsed_ms":1}`,
+		},
+	}
+
+	err := validateReviewFileResponse(resp, messages, map[string]any{
+		"matrix": map[string]any{
+			"file_path":      "deployments/docker-compose.yml",
+			"file_paths_csv": "deployments/docker-compose.yml",
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected validator to accept deduplicated inline note, got %v", err)
 	}
 }

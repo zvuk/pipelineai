@@ -42,6 +42,9 @@ func validateReviewFileResponse(resp llm.ChatCompletionResponse, messages []llm.
 	allowed := allowedReviewFilePaths(extra)
 	noteCalls := 0
 	successfulNotes := 0
+	deduplicatedNotes := 0
+	callAnchors := make(map[string]string)
+	successfulAnchors := make(map[string]int)
 
 	for _, msg := range messages {
 		if msg.Role == llm.RoleAssistant {
@@ -62,6 +65,9 @@ func validateReviewFileResponse(resp llm.ChatCompletionResponse, messages []llm.
 				if line <= 0 {
 					return fmt.Errorf("executor: review_file validator rejected non-positive inline note line %d", line)
 				}
+				if strings.TrimSpace(tc.ID) != "" {
+					callAnchors[strings.TrimSpace(tc.ID)] = inlineAnchorKey(filePath, line)
+				}
 			}
 			continue
 		}
@@ -70,24 +76,63 @@ func validateReviewFileResponse(resp llm.ChatCompletionResponse, messages []llm.
 			continue
 		}
 		var payload struct {
-			Tool string `json:"tool"`
-			Ok   bool   `json:"ok"`
+			Tool   string `json:"tool"`
+			Ok     bool   `json:"ok"`
+			Stdout string `json:"stdout"`
 		}
 		if err := json.Unmarshal([]byte(msg.Content), &payload); err != nil {
 			continue
 		}
 		if isInlineNoteTool(payload.Tool) && payload.Ok {
-			successfulNotes++
+			created, deduplicated := classifyInlineNoteToolResult(payload.Stdout)
+			if deduplicated {
+				deduplicatedNotes++
+			}
+			if created {
+				successfulNotes++
+				anchorKey := callAnchors[strings.TrimSpace(msg.ToolCallID)]
+				if anchorKey != "" {
+					successfulAnchors[anchorKey]++
+				}
+			}
 		}
 	}
 
 	if noteCalls == 0 {
 		return fmt.Errorf("executor: review_file validator expected at least one inline note tool call for non-SKIP response")
 	}
-	if successfulNotes == 0 {
-		return fmt.Errorf("executor: review_file validator did not observe any successful inline note creation")
+	for anchorKey, count := range successfulAnchors {
+		if count > 1 {
+			return fmt.Errorf("executor: review_file validator rejected duplicate inline note creation for anchor %q", anchorKey)
+		}
+	}
+	if successfulNotes == 0 && deduplicatedNotes == 0 {
+		return fmt.Errorf("executor: review_file validator did not observe any successful or deduplicated inline note result")
 	}
 	return nil
+}
+
+func classifyInlineNoteToolResult(stdout string) (created bool, deduplicated bool) {
+	created = true
+	if strings.TrimSpace(stdout) == "" {
+		return created, false
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &payload); err != nil {
+		return created, false
+	}
+	if value, ok := payload["deduplicated"].(bool); ok && value {
+		return false, true
+	}
+	if value, ok := payload["created"].(bool); ok && !value {
+		return false, false
+	}
+	return created, false
+}
+
+func inlineAnchorKey(filePath string, line int) string {
+	return fmt.Sprintf("%s:%d", strings.TrimSpace(filePath), line)
 }
 
 func allowedReviewFilePaths(extra map[string]any) map[string]struct{} {

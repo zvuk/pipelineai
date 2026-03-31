@@ -173,6 +173,8 @@ func (e *Executor) RunMatrixStep(ctx context.Context, stepID string, parallel in
 				if lastErr == nil {
 					status["ok"] = true
 					status["status"] = "ok"
+					status["degraded"] = false
+					status["error"] = ""
 					break
 				}
 
@@ -205,6 +207,8 @@ func (e *Executor) RunMatrixStep(ctx context.Context, stepID string, parallel in
 			if lastErr == nil {
 				status["ok"] = true
 				status["status"] = "ok"
+				status["degraded"] = false
+				status["error"] = ""
 			} else {
 				finalFailAttrs := []any{
 					slog.String("step", stepID),
