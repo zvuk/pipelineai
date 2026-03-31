@@ -9,12 +9,14 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
 // Manager управляет структурой каталогов артефактов PipelineAI.
 type Manager struct {
 	root string
+	mu   sync.Mutex
 }
 
 // NewManager создаёт менеджер артефактов и гарантирует наличие базового каталога.
@@ -36,6 +38,9 @@ func (m *Manager) Root() string {
 // WriteChatLog перезаписывает историю диалога в файле <root>/log/<step_id>.json.
 // payload должен быть JSON-сериализуемым (как правило, массив сообщений).
 func (m *Manager) WriteChatLog(stepID string, payload any) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	// пишем историю сообщений сверху вниз
 	if strings.TrimSpace(stepID) == "" {
 		return "", fmt.Errorf("artifacts: stepID must not be empty")
@@ -61,6 +66,9 @@ func (m *Manager) WriteChatLog(stepID string, payload any) (string, error) {
 
 // WriteLLMResponse сохраняет json-ответ LLM в каталоге llm/<step-id>.json.
 func (m *Manager) WriteLLMResponse(stepID string, payload any) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	// сохраняет json-ответ LLM в каталоге llm/<step-id>/<ts>.json с дедупликацией по meta.hash
 	if strings.TrimSpace(stepID) == "" {
 		return "", fmt.Errorf("artifacts: stepID must not be empty")
@@ -109,6 +117,9 @@ func (m *Manager) WriteLLMResponse(stepID string, payload any) (string, error) {
 
 // WriteToolPayload сохраняет полный payload инструмента в каталоге tools/<step-id>/<ts>-<tool>.json.
 func (m *Manager) WriteToolPayload(stepID string, toolName string, payload any) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if strings.TrimSpace(stepID) == "" {
 		return "", fmt.Errorf("artifacts: stepID must not be empty")
 	}
@@ -140,6 +151,9 @@ func (m *Manager) WriteToolPayload(stepID string, toolName string, payload any) 
 // WriteToolCaptureBundle сохраняет результат инструмента и связанные полные потоки вывода в отдельный каталог.
 // В каталоге всегда создаётся result.json, а переданные captureFiles копируются как отдельные файлы.
 func (m *Manager) WriteToolCaptureBundle(stepID string, toolName string, payload any, captureFiles map[string]string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if strings.TrimSpace(stepID) == "" {
 		return "", fmt.Errorf("artifacts: stepID must not be empty")
 	}
