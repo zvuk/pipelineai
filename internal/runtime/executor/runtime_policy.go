@@ -20,6 +20,7 @@ const (
 	defaultToolResultMode          = toolResultModePersistOnOverflow
 	defaultToolResultPreviewTokens = 512
 	defaultShellCaptureMaxBytes    = 256 * 1024
+	defaultBudgetMode              = budgetModeContinueWithCompaction
 )
 
 func resolveBudgetMode(cfg *dsl.Config, step *dsl.Step) string {
@@ -33,7 +34,7 @@ func resolveBudgetMode(cfg *dsl.Config, step *dsl.Step) string {
 			return mode
 		}
 	}
-	return budgetModeHardStop
+	return defaultBudgetMode
 }
 
 func normalizeBudgetMode(mode string) string {
