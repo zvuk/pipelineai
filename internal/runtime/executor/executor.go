@@ -61,11 +61,6 @@ func (e *Executor) runStepWithPolicy(ctx context.Context, step dsl.Step, stepID 
 
 		err := e.runSingleStep(stepCtx, step, stepID, parallel, name)
 		if err == nil {
-			e.log.Info("step end",
-				slog.String("step", stepID),
-				slog.String("type", step.Type),
-				slog.String("name", name),
-			)
 			return nil
 		}
 
@@ -237,7 +232,7 @@ func (e *Executor) RunShellStep(ctx context.Context, stepID string, extra map[st
 
 	stdout, stderr, err := runBashStep(ctx, run, dir, timeout, "shell", stepID, step.Env, tctx)
 	if err != nil {
-		return "", err
+		return "", e.annotateBashStepError("shell", stepID, err)
 	}
 	// Обработка outputs для shell шага
 	if err := e.processShellOutputs(step, stdout, stderr, inputs, extra); err != nil {

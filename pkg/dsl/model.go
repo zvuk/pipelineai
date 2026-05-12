@@ -9,6 +9,9 @@ type Config struct {
 	Defaults  *Defaults  `yaml:"defaults,omitempty"`
 	Functions []Function `yaml:"functions,omitempty"`
 	Steps     []Step     `yaml:"steps"`
+	// ProjectConfig описывает пользовательские расширения сценария: внешние ресурсы
+	// и именованные блоки инструкций, доступные в промптах.
+	ProjectConfig *ProjectConfig `yaml:"project_config,omitempty"`
 	// Approvers — глобальные правила для инструментов (shell/apply_patch).
 	Approvers []Approver `yaml:"approvers,omitempty"`
 	// BaseDir — директория файла конфигурации (служебное поле, не из YAML)
@@ -63,6 +66,79 @@ type Agent struct {
 type AgentOpenAI struct {
 	BaseURL   string `yaml:"base_url"`
 	APIKeyEnv string `yaml:"api_key_env"`
+}
+
+// ProjectConfig задаёт расширения сценария, которые можно дополнить или
+// переопределить файлом .pai-config.yaml из целевого репозитория.
+type ProjectConfig struct {
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// LocalPath — локальный override-файл. Если поле пустое, runtime использует
+	// PAI_CONFIG_PATH, а затем .pai-config.yaml в текущем рабочем каталоге.
+	LocalPath TemplateString `yaml:"local_path,omitempty"`
+	// Remote — опциональный git-репозиторий, из которого надо взять override config.
+	Remote *ProjectConfigRemote `yaml:"remote,omitempty"`
+
+	InstructionBlocks []InstructionBlock `yaml:"instruction_blocks,omitempty"`
+	ResourceCopy      []ResourceCopy     `yaml:"resource_copy,omitempty"`
+
+	// Resources — runtime-карта id -> destination после resource_copy.
+	Resources map[string]string `yaml:"-"`
+}
+
+// ProjectConfigRemote описывает remote override config.
+type ProjectConfigRemote struct {
+	URL               TemplateString `yaml:"url,omitempty"`
+	Ref               TemplateString `yaml:"ref,omitempty"`
+	Path              TemplateString `yaml:"path,omitempty"`
+	TokenEnv          TemplateString `yaml:"token_env,omitempty"`
+	TokenFallbackEnvs []string       `yaml:"token_fallback_envs,omitempty"`
+	AuthMode          string         `yaml:"auth_mode,omitempty"`
+	Username          TemplateString `yaml:"username,omitempty"`
+}
+
+// InstructionBlock — именованный блок текста, который можно вставить в prompt.
+type InstructionBlock struct {
+	ID      string            `yaml:"id"`
+	Title   TemplateString    `yaml:"title,omitempty"`
+	Content TemplateString    `yaml:"content,omitempty"`
+	Mode    string            `yaml:"mode,omitempty"`
+	Items   []InstructionItem `yaml:"items,omitempty"`
+}
+
+// InstructionItem описывает один файл/ссылку/правило внутри блока инструкций.
+type InstructionItem struct {
+	Label    TemplateString    `yaml:"label,omitempty"`
+	Path     TemplateString    `yaml:"path,omitempty"`
+	Content  TemplateString    `yaml:"content,omitempty"`
+	Required bool              `yaml:"required,omitempty"`
+	When     *InstructionWhen  `yaml:"when,omitempty"`
+	Meta     map[string]string `yaml:"meta,omitempty"`
+}
+
+// InstructionWhen ограничивает применимость instruction item текущим контекстом.
+type InstructionWhen struct {
+	AnyGlob []string `yaml:"any_glob,omitempty"`
+	AnyExt  []string `yaml:"any_ext,omitempty"`
+}
+
+// ResourceCopy описывает копирование файлов/директорий перед запуском сценария.
+type ResourceCopy struct {
+	ID          string         `yaml:"id"`
+	Source      ResourceSource `yaml:"source"`
+	Destination TemplateString `yaml:"destination"`
+}
+
+// ResourceSource описывает источник файлов для resource_copy.
+type ResourceSource struct {
+	Repo              string         `yaml:"repo,omitempty"` // target или git
+	Path              TemplateString `yaml:"path,omitempty"`
+	URL               TemplateString `yaml:"url,omitempty"`
+	Ref               TemplateString `yaml:"ref,omitempty"`
+	TokenEnv          TemplateString `yaml:"token_env,omitempty"`
+	TokenFallbackEnvs []string       `yaml:"token_fallback_envs,omitempty"`
+	AuthMode          string         `yaml:"auth_mode,omitempty"` // basic, bearer, none
+	Username          TemplateString `yaml:"username,omitempty"`
 }
 
 // Defaults задаёт значения по умолчанию для шагов.

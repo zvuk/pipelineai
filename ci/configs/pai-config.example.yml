@@ -1,0 +1,24 @@
+version: 1
+
+# Example repo-level override. Put it into the target repository root as
+# .pai-config.yaml, or pass it via PAI_CONFIG_PATH / PAI_CONFIG_REPO_*.
+
+resource_copy:
+  - id: qa_rules
+    source:
+      repo: target
+      path: ci/qa-rules
+    destination: .pai/resources/qa-rules
+
+instruction_blocks:
+  - id: ai_review_rules
+    mode: append
+    items:
+      - path: '{{ index .project.resources "qa_rules" }}/playwright.md'
+        label: "Playwright QA rules"
+        when:
+          any_glob:
+            - "**/*.spec.ts"
+            - "**/*.e2e.ts"
+            - "**/playwright/**"
+            - "**/tests/**"

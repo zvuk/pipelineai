@@ -49,7 +49,7 @@ func (e *Executor) RunPlanStep(ctx context.Context, stepID string, extra map[str
 	timeout := stepTimeoutOrDefault(step.Plan.Timeout)
 	stdout, stderr, err := runBashStep(ctx, run, dir, timeout, "plan", stepID, step.Env, tctx)
 	if err != nil {
-		return "", err
+		return "", e.annotateBashStepError("plan", stepID, err)
 	}
 
 	// Outputs для plan шага обрабатываются так же, как для shell.

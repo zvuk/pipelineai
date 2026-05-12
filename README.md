@@ -21,8 +21,9 @@
 - [📜 YAML‑DSL: структура сценария](#yaml-dsl-структура-сценария)
   - [4.1. Блок `agent`](#41-блок-agent)
   - [4.2. Блок `defaults`](#42-блок-defaults)
-  - [4.3. Функции (`functions`) и инструменты](#43-функции-functions-и-инструменты)
-  - [4.4. Шаги (`steps`)](#44-шаги-steps)
+  - [4.3. Блок `project_config`](#43-блок-project_config)
+  - [4.4. Функции (`functions`) и инструменты](#44-функции-functions-и-инструменты)
+  - [4.5. Шаги (`steps`)](#45-шаги-steps)
 - [🔧 Типы шагов](#типы-шагов)
   - [5.1. `shell`](#51-shell)
   - [5.2. `plan`](#52-plan)
@@ -65,6 +66,9 @@ PAI читает настройки LLM из `.env` (если он есть) и 
 - `LLM_MODEL` — идентификатор модели (в примерах: `openai/gpt-oss-20b`)
 - `LLM_API_KEY` — ключ (опционально для локальных рантаймов)
 - `LLM_REQUEST_TIMEOUT` — таймаут запроса к LLM
+- `PAI_LOG_FORMAT=human|json` — формат логов CLI, по умолчанию `human`
+- `PAI_LOG_COLOR=auto|always|never` — цветной вывод для human-логов
+- `LOG_LEVEL=debug|info|warn|error` — детализация логов
 
 Для локальной сборки из этого репозитория рекомендуется `make build`: цель автоматически подтягивает `libtokenizers.a` и включает exact tokenizer backend (`tokenizers_hf`) для model-specific подсчёта токенов.
 
@@ -118,6 +122,8 @@ jobs:
 ### 2.3. Переопределение правил и промптов
 
 По умолчанию используются ресурсы из PipelineAI (`ci/prompts`, `ci/rules`).  
+Для добавления отдельных rule-файлов используйте `.pai-config.yaml` в корне репозитория: он может скопировать ресурсы и дописать их в instruction block `ai_review_rules`.
+
 Если нужно переопределить промпты/правила в вашем репозитории, задайте абсолютные пути:
 
 - `PAI_AI_REVIEW_PROMPTS_DIR="$GITHUB_WORKSPACE/ci/prompts"`
@@ -253,7 +259,56 @@ steps:
 
 **Эти значения можно переопределять на уровне конкретного шага.**
 
-### 4.3. Функции (`functions`) и инструменты
+### 4.3. Блок `project_config`
+
+`project_config` — общий механизм расширения сценариев без привязки к конкретному flow.  
+Он позволяет вынести повторяемые инструкции и подготовку файлов из prompt в YAML.
+
+```yaml
+project_config:
+  enabled: true
+  instruction_blocks:
+    - id: review_rules
+      title: "Review rules"
+      content: "Read relevant rule files before analysis."
+      items:
+        - path: "ci/rules/general.md"
+          label: "General engineering rules"
+          required: true
+        - path: "ci/rules/playwright.md"
+          label: "Playwright QA rules"
+          when:
+            any_glob: ["**/*.spec.ts", "**/*.e2e.ts"]
+  resource_copy:
+    - id: shared_rules
+      source:
+        repo: git
+        url: "https://git.example.com/platform/ai-rules.git"
+        ref: "main"
+        path: "rules"
+        token_env: "PAI_RULES_REPO_TOKEN"
+        token_fallback_envs: ["PAI_GIT_API_TOKEN", "CI_JOB_TOKEN"]
+      destination: ".pai/rules"
+```
+
+В prompt блок вставляется через шаблон:
+
+```gotemplate
+{{ index .project.instruction_blocks "review_rules" }}
+```
+
+Repo-level override загружается из `.pai-config.yaml` в рабочем каталоге. Также можно указать:
+
+- `PAI_CONFIG_PATH` — локальный путь к override-файлу;
+- `PAI_CONFIG_REPO_URL`, `PAI_CONFIG_REPO_REF`, `PAI_CONFIG_REPO_FILE` — git-репозиторий, ref и путь к `.pai-config.yaml`;
+- `PAI_CONFIG_REPO_TOKEN_ENV` — имя env-переменной с токеном;
+- fallback токены: `PAI_CONFIG_REPO_TOKEN`, `PAI_GIT_API_TOKEN`, `CI_JOB_TOKEN`, `GITHUB_TOKEN`.
+
+Override-файл может содержать корневые `instruction_blocks` и `resource_copy` или вложенный `project_config`. Блоки инструкций с тем же `id` по умолчанию дополняют базовый блок (`mode: append`); `mode: replace` заменяет его целиком.
+
+Пример repo-level override для Playwright лежит в `ci/configs/pai-config.example.yml`.
+
+### 4.4. Функции (`functions`) и инструменты
 
 Функции — это пользовательские **tools**, которые LLM может вызывать через механизм function calling.  
 Определяются в корне YAML в списке `functions` и включаются в шаг через `tools_allowed`.
@@ -303,7 +358,7 @@ functions:
 - при превышении `agent.auto_compact_percent` выполняется отдельный LLM compaction pass;
 - старый хвост истории заменяется кратким handoff summary, а актуальный хвост текущего диалога сохраняется.
 
-### 4.4. Шаги (`steps`)
+### 4.5. Шаги (`steps`)
 
 Любой шаг имеет базовые поля:
 
@@ -339,13 +394,14 @@ functions:
 - `shell.run` — скрипт, обычно в строгом режиме (`set -euo pipefail`).
 - `shell.dir` — рабочая директория.
 - `timeout` на шаге может переопределить `defaults.step_timeout`.
+- при ошибке shell/plan шага в лог попадает `exit_code`, строка, команда и tail `stderr`, а полный stdout/stderr сохраняется в артефактах `shell/<step-id>/`.
 - Через `outputs` можно сохранить `stdout`/`stderr` или файлы (см. раздел про артефакты).
 
 ### 5.2. `plan`
 
 Шаг `plan` используется для построения стратегии выполнения и поддерживает два режима:
 
-- `plan.engine: shell` (по умолчанию) — выполнение `plan.run` через `bash -lc`;
+- `plan.engine: shell` (по умолчанию) — выполнение `plan.run` через bash-раннер с диагностикой ошибок;
 - `plan.engine: partition` — встроенный движок декларативного разбиения элементов.
 
 ```yaml

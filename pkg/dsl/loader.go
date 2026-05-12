@@ -10,12 +10,13 @@ import (
 )
 
 type rawConfig struct {
-	Version   int        `yaml:"version"`
-	Agent     rawAgent   `yaml:"agent"`
-	Defaults  *Defaults  `yaml:"defaults,omitempty"`
-	Functions []Function `yaml:"functions,omitempty"`
-	Steps     []Step     `yaml:"steps"`
-	Approvers []Approver `yaml:"approvers,omitempty"`
+	Version       int            `yaml:"version"`
+	Agent         rawAgent       `yaml:"agent"`
+	Defaults      *Defaults      `yaml:"defaults,omitempty"`
+	Functions     []Function     `yaml:"functions,omitempty"`
+	Steps         []Step         `yaml:"steps"`
+	ProjectConfig *ProjectConfig `yaml:"project_config,omitempty"`
+	Approvers     []Approver     `yaml:"approvers,omitempty"`
 }
 
 type rawAgent struct {
@@ -109,11 +110,12 @@ func normalize(raw rawConfig) (*Config, error) {
 	}
 
 	cfg := &Config{
-		Version:   raw.Version,
-		Defaults:  raw.Defaults,
-		Functions: raw.Functions,
-		Steps:     raw.Steps,
-		Approvers: raw.Approvers,
+		Version:       raw.Version,
+		Defaults:      raw.Defaults,
+		Functions:     raw.Functions,
+		Steps:         raw.Steps,
+		ProjectConfig: raw.ProjectConfig,
+		Approvers:     raw.Approvers,
 		Agent: Agent{
 			Name:                          name,
 			Model:                         model,
@@ -210,7 +212,7 @@ func validatePromptPath(baseDir string, stepIdx int, fieldName string, tpl Templ
 func fileNonEmpty(p string) error {
 	st, err := os.Stat(p)
 	if err != nil {
-		return fmt.Errorf("file does not exist: %v", err)
+		return fmt.Errorf("file does not exist: %w", err)
 	}
 	if st.IsDir() {
 		return fmt.Errorf("path points to a directory: %s", p)

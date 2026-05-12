@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/zvuk/pipelineai/internal/runtime/matrix"
+	"github.com/zvuk/pipelineai/internal/runtime/projectconfig"
 )
 
 // RunMatrixStep разворачивает элементы из manifest и исполняет шаблонный шаг для каждого элемента с учётом параллелизма.
@@ -30,6 +31,7 @@ func (e *Executor) RunMatrixStep(ctx context.Context, stepID string, parallel in
 		"step":     templateStep(step),
 		"defaults": e.templateDefaults(),
 		"outputs":  e.outputsContext(),
+		"project":  projectconfig.StaticTemplateContext(e.cfg.ProjectConfig),
 	}
 
 	manifestPath, err := step.Matrix.FromYAML.Execute(tctx)
@@ -88,7 +90,7 @@ func (e *Executor) RunMatrixStep(ctx context.Context, stepID string, parallel in
 		idCtx := map[string]any{"item": item, "index": idx}
 		itemID, err := step.Matrix.ItemID.Execute(idCtx)
 		if err != nil {
-			return fmt.Errorf("executor: failed to render matrix.item_id for step %s: %v", stepID, err)
+			return fmt.Errorf("executor: failed to render matrix.item_id for step %s: %w", stepID, err)
 		}
 		itemID = strings.TrimSpace(itemID)
 		if itemID == "" {
@@ -104,9 +106,10 @@ func (e *Executor) RunMatrixStep(ctx context.Context, stepID string, parallel in
 				"step":     templateStep(step),
 				"defaults": e.templateDefaults(),
 				"outputs":  e.outputsContext(),
+				"project":  projectconfig.StaticTemplateContext(e.cfg.ProjectConfig),
 			})
 			if err != nil {
-				return fmt.Errorf("executor: failed to render matrix.inject[%s] for step %s: %v", k, stepID, err)
+				return fmt.Errorf("executor: failed to render matrix.inject[%s] for step %s: %w", k, stepID, err)
 			}
 			inject[k] = strings.TrimSpace(val)
 		}
@@ -135,11 +138,18 @@ func (e *Executor) RunMatrixStep(ctx context.Context, stepID string, parallel in
 
 		sem <- struct{}{}
 		wg.Add(1)
-		go func(itemID string, extra map[string]any) {
+		go func(itemID string, index int, extra map[string]any) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
 			started := time.Now().UTC()
+			e.log.Info("matrix item start",
+				slog.String("step", stepID),
+				slog.String("run_step", runStepID),
+				slog.String("item_id", itemID),
+				slog.Int("item", index+1),
+				slog.Int("items", len(items)),
+			)
 			status := map[string]any{
 				"step":        stepID,
 				"run_step":    runStepID,
@@ -232,7 +242,16 @@ func (e *Executor) RunMatrixStep(ctx context.Context, stepID string, parallel in
 			status["finished_at"] = finished.Format(time.RFC3339Nano)
 			// Запишем статус в .agent/artifacts/items/<id>/status.json
 			_ = e.writeItemStatus(itemID, status)
-		}(itemID, matrixCtx)
+			e.log.Info("matrix item end",
+				slog.String("step", stepID),
+				slog.String("run_step", runStepID),
+				slog.String("item_id", itemID),
+				slog.Int("item", index+1),
+				slog.Int("items", len(items)),
+				slog.String("status", fmt.Sprint(status["status"])),
+				slog.Duration("elapsed", finished.Sub(started)),
+			)
+		}(itemID, idx, matrixCtx)
 	}
 
 	wg.Wait()
@@ -260,8 +279,11 @@ func (e *Executor) writeItemStatus(itemID string, status map[string]any) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
-	return enc.Encode(status)
+	if err := enc.Encode(status); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
