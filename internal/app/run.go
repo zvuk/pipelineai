@@ -13,6 +13,7 @@ import (
 
 	"github.com/zvuk/pipelineai/internal/runtime/executor"
 	"github.com/zvuk/pipelineai/internal/runtime/llm"
+	"github.com/zvuk/pipelineai/internal/runtime/projectconfig"
 	"github.com/zvuk/pipelineai/pkg/config"
 	"github.com/zvuk/pipelineai/pkg/dsl"
 )
@@ -129,6 +130,7 @@ func runStep(ctx context.Context, opts runOptions) error {
 	if strings.TrimSpace(artifactDir) == "" {
 		artifactDir = cfg.Agent.ArtifactDir
 	}
+	cfg.Agent.ArtifactDir = artifactDir
 
 	// INFO: старт сценария — базовые параметры
 	opts.Log.Info("scenario start",
@@ -137,6 +139,10 @@ func runStep(ctx context.Context, opts runOptions) error {
 		slog.Duration("llm_timeout", settings.LLMRequestTimeout),
 		slog.String("artifact_dir", artifactDir),
 	)
+
+	if err := projectconfig.Prepare(ctx, cfg, opts.Log); err != nil {
+		return err
+	}
 
 	exec, err := executor.New(cfg, client, artifactDir, opts.Log)
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/zvuk/pipelineai/internal/runtime/llm"
+	"github.com/zvuk/pipelineai/internal/runtime/projectconfig"
 	"github.com/zvuk/pipelineai/internal/tools/approval"
 	"github.com/zvuk/pipelineai/internal/tools/prompts"
 	"github.com/zvuk/pipelineai/internal/tools/registry"
@@ -474,11 +475,15 @@ func (e *Executor) buildPromptsAndRequest(step dsl.Step, inputs map[string]ioVal
 		"outputs": e.outputsContext(),
 	}
 	// Дополнительный контекст (например, matrix)
-	if extra != nil {
-		for k, v := range extra {
-			templateCtx[k] = v
-		}
+	for k, v := range extra {
+		templateCtx[k] = v
 	}
+	templateCtx["project"] = projectconfig.StaticTemplateContext(e.cfg.ProjectConfig)
+	projectCtx, err := projectconfig.TemplateContext(e.cfg.ProjectConfig, templateCtx)
+	if err != nil {
+		return "", "", llm.ChatCompletionRequest{}, err
+	}
+	templateCtx["project"] = projectCtx
 	// system_prompt: из файла по system_prompt_path, иначе inline; при отсутствии — используем дефолтный встроенный шаблон
 	systemPrompt, err := e.renderPromptMaybeFromFile(step.LLM.SystemPromptPath, step.LLM.SystemPrompt, templateCtx)
 	if err != nil {

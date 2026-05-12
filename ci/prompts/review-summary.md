@@ -69,13 +69,8 @@
      - чтения `pr-context.json` (список файлов, объём диффов);
      - чтения артефактов пофайлового ревью, если они есть (`{{ .agent.artifact_dir }}/ai-review/files/*.md`);
      - чтения статусов юнитов (`{{ .agent.artifact_dir }}/items/*/status.json`);
-     - обязательного чтения правил из `{{ $rulesDir }}/*.md` **перед формированием summary**, в том числе:
-       - `general.md`;
-       - `go.md` — для Go‑частей;
-       - `python.md` — для Python‑частей;
-       - `js_ts.md` — для JavaScript/TypeScript‑частей;
-       - `kotlin.md` — для Kotlin‑частей;
-       - `swift.md` — для Swift‑частей;
+     - обязательного чтения правил **перед формированием summary**:
+{{ index .project.instruction_blocks "ai_review_rules" }}
       - поиска паттернов и стайлгайдов в проекте.
 
 5. **Формат и тон:**

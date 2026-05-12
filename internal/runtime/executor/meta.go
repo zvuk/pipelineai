@@ -3,6 +3,7 @@ package executor
 import (
 	"strings"
 
+	"github.com/zvuk/pipelineai/internal/runtime/projectconfig"
 	"github.com/zvuk/pipelineai/pkg/dsl"
 )
 
@@ -14,6 +15,7 @@ func (e *Executor) renderStepMeta(step dsl.Step) (name, description string) {
 		"step":     templateStep(step),
 		"defaults": e.templateDefaults(),
 		"outputs":  e.outputsContext(),
+		"project":  projectconfig.StaticTemplateContext(e.cfg.ProjectConfig),
 	}
 	if !step.Name.IsZero() {
 		if v, err := step.Name.Execute(tctx); err == nil {

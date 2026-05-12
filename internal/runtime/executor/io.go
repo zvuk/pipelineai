@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/zvuk/pipelineai/internal/runtime/llm"
+	"github.com/zvuk/pipelineai/internal/runtime/projectconfig"
 	"github.com/zvuk/pipelineai/pkg/dsl"
 )
 
@@ -31,12 +32,11 @@ func (e *Executor) renderInputs(step dsl.Step, extra map[string]any) (map[string
 		"step":     templateStep(step),
 		"defaults": e.templateDefaults(),
 		"outputs":  e.outputsContext(),
+		"project":  projectconfig.StaticTemplateContext(e.cfg.ProjectConfig),
 	}
 	// Пробрасываем дополнительный контекст (например, matrix)
-	if extra != nil {
-		for k, v := range extra {
-			tctx[k] = v
-		}
+	for k, v := range extra {
+		tctx[k] = v
 	}
 
 	for _, in := range step.Inputs {
@@ -56,7 +56,7 @@ func (e *Executor) renderInputs(step dsl.Step, extra map[string]any) (map[string
 				return nil, fmt.Errorf("executor: inputs[%s].path evaluated to empty", id)
 			}
 			if _, err := os.Stat(p); err != nil {
-				return nil, fmt.Errorf("executor: inputs[%s].path does not exist: %v", id, err)
+				return nil, fmt.Errorf("executor: inputs[%s].path does not exist: %w", id, err)
 			}
 			result[id] = ioValue{Path: p}
 		case "inline":
@@ -116,11 +116,10 @@ func (e *Executor) processLLMOutputs(step dsl.Step, resp llm.ChatCompletionRespo
 		"defaults": e.templateDefaults(),
 		"inputs":   inputsToTemplate(inputs),
 		"outputs":  e.outputsContext(),
+		"project":  projectconfig.StaticTemplateContext(e.cfg.ProjectConfig),
 	}
-	if extra != nil {
-		for k, v := range extra {
-			tctx[k] = v
-		}
+	for k, v := range extra {
+		tctx[k] = v
 	}
 	// Финальное содержимое ответа ассистента
 	var finalText string
@@ -157,7 +156,7 @@ func (e *Executor) processLLMOutputs(step dsl.Step, resp llm.ChatCompletionRespo
 				// Пишем весь ответ модели
 				b, err := json.MarshalIndent(resp, "", "  ")
 				if err != nil {
-					return fmt.Errorf("executor: failed to marshal llm_json for output %s: %v", id, err)
+					return fmt.Errorf("executor: failed to marshal llm_json for output %s: %w", id, err)
 				}
 				data = b
 			default:
@@ -196,11 +195,10 @@ func (e *Executor) processShellOutputs(step dsl.Step, stdout, stderr string, inp
 		"defaults": e.templateDefaults(),
 		"inputs":   inputsToTemplate(inputs),
 		"outputs":  e.outputsContext(),
+		"project":  projectconfig.StaticTemplateContext(e.cfg.ProjectConfig),
 	}
-	if extra != nil {
-		for k, v := range extra {
-			tctx[k] = v
-		}
+	for k, v := range extra {
+		tctx[k] = v
 	}
 	for _, out := range step.Outputs {
 		id := strings.TrimSpace(out.ID)
@@ -219,7 +217,7 @@ func (e *Executor) processShellOutputs(step dsl.Step, stdout, stderr string, inp
 				return fmt.Errorf("executor: outputs[%s].path evaluated to empty", id)
 			}
 			if _, err := os.Stat(p); err != nil {
-				return fmt.Errorf("executor: outputs[%s].path does not exist: %v", id, err)
+				return fmt.Errorf("executor: outputs[%s].path does not exist: %w", id, err)
 			}
 			e.recordOutput(step.ID, id, ioValue{Path: p})
 			continue

@@ -20,6 +20,48 @@ defaults:
   step_timeout: 120m
   tool_timeout: 120s
 
+project_config:
+  enabled: true
+  local_path: '{{ env "PAI_CONFIG_PATH" ".pai-config.yaml" }}'
+  remote:
+    url: '{{ env "PAI_CONFIG_REPO_URL" "" }}'
+    ref: '{{ env "PAI_CONFIG_REPO_REF" "main" }}'
+    path: '{{ env "PAI_CONFIG_REPO_FILE" ".pai-config.yaml" }}'
+    token_env: '{{ env "PAI_CONFIG_REPO_TOKEN_ENV" "" }}'
+    token_fallback_envs: ["PAI_CONFIG_REPO_TOKEN", "PAI_GIT_API_TOKEN", "CI_JOB_TOKEN", "GITHUB_TOKEN"]
+    auth_mode: basic
+    username: '{{ env "PAI_CONFIG_REPO_USERNAME" "oauth2" }}'
+  instruction_blocks:
+    - id: ai_review_rules
+      title: "Project rules"
+      content: |
+        Read applicable rule files with `shell` before analysis.
+        Repo-level `.pai-config.yaml` may append more rule files to this block.
+      items:
+        - path: '{{ default "ci/rules" (env "PAI_AI_REVIEW_RULES_DIR") }}/general.md'
+          label: "general engineering and architecture rules"
+          required: true
+        - path: '{{ default "ci/rules" (env "PAI_AI_REVIEW_RULES_DIR") }}/go.md'
+          label: "Go rules"
+          when:
+            any_ext: [".go"]
+        - path: '{{ default "ci/rules" (env "PAI_AI_REVIEW_RULES_DIR") }}/python.md'
+          label: "Python rules"
+          when:
+            any_ext: [".py"]
+        - path: '{{ default "ci/rules" (env "PAI_AI_REVIEW_RULES_DIR") }}/js_ts.md'
+          label: "JavaScript/TypeScript rules"
+          when:
+            any_ext: [".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"]
+        - path: '{{ default "ci/rules" (env "PAI_AI_REVIEW_RULES_DIR") }}/kotlin.md'
+          label: "Kotlin rules"
+          when:
+            any_ext: [".kt", ".kts"]
+        - path: '{{ default "ci/rules" (env "PAI_AI_REVIEW_RULES_DIR") }}/swift.md'
+          label: "Swift rules"
+          when:
+            any_ext: [".swift"]
+
 functions:
   # Возвращает дифф по конкретному файлу из pr-context.json.
   - name: github_get_file_diff

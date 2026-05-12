@@ -3,6 +3,7 @@ package logger
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -40,24 +41,34 @@ func NewHumanHandler(w io.Writer, min slog.Leveler, useColor bool) *HumanHandler
 	return &HumanHandler{w: w, minLevel: min, useColor: useColor}
 }
 
+func (h *HumanHandler) clone() *HumanHandler {
+	return &HumanHandler{
+		w:        h.w,
+		minLevel: h.minLevel,
+		useColor: h.useColor,
+		attrs:    append([]slog.Attr{}, h.attrs...),
+		group:    h.group,
+	}
+}
+
 func (h *HumanHandler) Enabled(_ context.Context, level slog.Level) bool {
 	return level >= h.minLevel.Level()
 }
 
 func (h *HumanHandler) WithAttrs(as []slog.Attr) slog.Handler {
-	cp := *h
-	cp.attrs = append(append([]slog.Attr{}, h.attrs...), as...)
-	return &cp
+	cp := h.clone()
+	cp.attrs = append(cp.attrs, as...)
+	return cp
 }
 
 func (h *HumanHandler) WithGroup(name string) slog.Handler {
-	cp := *h
+	cp := h.clone()
 	if h.group != "" {
 		cp.group = h.group + "." + name
 	} else {
 		cp.group = name
 	}
-	return &cp
+	return cp
 }
 
 func colorize(use bool, color, s string) string {
@@ -82,8 +93,8 @@ func (h *HumanHandler) Handle(_ context.Context, r slog.Record) error {
 		ts = time.Now()
 	}
 	level := r.Level
-	lvlTxt := "INF"
-	lvlColor := cGreen
+	var lvlTxt string
+	var lvlColor string
 	switch level {
 	case slog.LevelDebug:
 		lvlTxt = "DBG"
@@ -110,7 +121,7 @@ func (h *HumanHandler) Handle(_ context.Context, r slog.Record) error {
 	for _, a := range all {
 		if !a.Equal(slog.Attr{}) {
 			k := a.Key
-			v := fmt.Sprint(a.Value)
+			v := formatValue(a.Value)
 			switch k {
 			case "step", "id":
 				k = colorize(h.useColor, cBlue, k)
@@ -127,16 +138,21 @@ func (h *HumanHandler) Handle(_ context.Context, r slog.Record) error {
 			case "tool":
 				k = colorize(h.useColor, cMag, k)
 				v = colorize(h.useColor, cMag, v)
-			case "ok", "result":
+			case "ok", "result", "status":
 				k = colorize(h.useColor, cBold, k)
-				if strings.EqualFold(v, "true") || strings.EqualFold(v, "ok") || strings.EqualFold(v, "pass") {
+				if strings.EqualFold(v, "true") || strings.EqualFold(v, "ok") || strings.EqualFold(v, "pass") || strings.EqualFold(v, "success") {
 					v = colorize(h.useColor, cGreen, v)
+				} else if strings.EqualFold(v, "degraded") || strings.EqualFold(v, "warn") || strings.EqualFold(v, "warning") {
+					v = colorize(h.useColor, cYellow, v)
 				} else {
 					v = colorize(h.useColor, cRed, v)
 				}
-			case "elapsed", "elapsed_ms", "tokens", "prompt_tokens", "completion_tokens", "total_tokens":
+			case "elapsed", "elapsed_ms", "tokens", "prompt_tokens", "completion_tokens", "total_tokens", "artifact_path", "artifact_dir", "source", "destination":
 				k = colorize(h.useColor, cGray, k)
 				v = colorize(h.useColor, cGray, v)
+			case "error", "stderr_tail", "stdout_tail", "exit_code", "line":
+				k = colorize(h.useColor, cRed, k)
+				v = colorize(h.useColor, cRed, v)
 			default:
 				// оставим как есть
 			}
@@ -157,7 +173,7 @@ func (h *HumanHandler) Handle(_ context.Context, r slog.Record) error {
 	return err
 }
 
-// New создаёт цветной slog.Logger. Уровень берётся из env LOG_LEVEL (debug|info|warn|error), цвет из NO_COLOR.
+// New создаёт slog.Logger. Уровень берётся из LOG_LEVEL, формат — из PAI_LOG_FORMAT.
 func New() (*slog.Logger, error) {
 	lvl := strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL")))
 	var min slog.Level
@@ -171,13 +187,48 @@ func New() (*slog.Logger, error) {
 	default:
 		min = slog.LevelInfo
 	}
-	noColor := strings.TrimSpace(os.Getenv("NO_COLOR"))
-	useColor := !(noColor == "1" || strings.EqualFold(noColor, "true"))
+	format := strings.ToLower(strings.TrimSpace(os.Getenv("PAI_LOG_FORMAT")))
+	if format == "json" {
+		h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: min})
+		log := slog.New(h)
+		slog.SetDefault(log)
+		return log, nil
+	}
+	if format != "" && format != "human" && format != "text" {
+		return nil, fmt.Errorf("logger: unsupported PAI_LOG_FORMAT %q", format)
+	}
+	useColor := resolveColorMode()
 	h := NewHumanHandler(os.Stdout, min, useColor)
 	log := slog.New(h)
 	// Сделаем дефолтным для пакетов, где логгер не проброшен
 	slog.SetDefault(log)
 	return log, nil
+}
+
+func resolveColorMode() bool {
+	if noColor := strings.TrimSpace(os.Getenv("NO_COLOR")); noColor == "1" || strings.EqualFold(noColor, "true") {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("PAI_LOG_COLOR"))) {
+	case "always", "1", "true", "yes", "on":
+		return true
+	case "never", "0", "false", "no", "off":
+		return false
+	}
+	return !strings.EqualFold(strings.TrimSpace(os.Getenv("TERM")), "dumb")
+}
+
+func formatValue(v slog.Value) string {
+	if v.Kind() == slog.KindAny {
+		raw := v.Any()
+		if raw == nil {
+			return ""
+		}
+		if data, err := json.Marshal(raw); err == nil {
+			return string(data)
+		}
+	}
+	return fmt.Sprint(v)
 }
 
 type ctxKey int

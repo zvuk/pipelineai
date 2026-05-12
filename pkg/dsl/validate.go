@@ -89,6 +89,7 @@ func Validate(cfg *Config) error {
 	if err := validateFunctions(cfg.Functions); err != nil {
 		problems = append(problems, err.Error())
 	}
+	validateProjectConfig(cfg.ProjectConfig, &problems)
 
 	seenIDs := make(map[string]struct{}, len(cfg.Steps))
 	for idx, step := range cfg.Steps {
@@ -221,6 +222,57 @@ func Validate(cfg *Config) error {
 	}
 
 	return fmt.Errorf("dsl: configuration errors:\n - %s", strings.Join(problems, "\n - "))
+}
+
+func validateProjectConfig(pc *ProjectConfig, problems *[]string) {
+	if pc == nil {
+		return
+	}
+	seenBlocks := make(map[string]struct{}, len(pc.InstructionBlocks))
+	for i, block := range pc.InstructionBlocks {
+		path := fmt.Sprintf("project_config.instruction_blocks[%d]", i)
+		id := strings.TrimSpace(block.ID)
+		if id == "" {
+			*problems = append(*problems, fmt.Sprintf("%s.id is required", path))
+			continue
+		}
+		if _, ok := seenBlocks[id]; ok {
+			*problems = append(*problems, fmt.Sprintf("%s: duplicate instruction block id %q", path, id))
+		}
+		seenBlocks[id] = struct{}{}
+		if mode := strings.ToLower(strings.TrimSpace(block.Mode)); mode != "" && mode != "append" && mode != "prepend" && mode != "replace" {
+			*problems = append(*problems, fmt.Sprintf("%s.mode has unsupported value %q", path, block.Mode))
+		}
+	}
+	seenCopies := make(map[string]struct{}, len(pc.ResourceCopy))
+	for i, item := range pc.ResourceCopy {
+		path := fmt.Sprintf("project_config.resource_copy[%d]", i)
+		id := strings.TrimSpace(item.ID)
+		if id == "" {
+			*problems = append(*problems, fmt.Sprintf("%s.id is required", path))
+			continue
+		}
+		if _, ok := seenCopies[id]; ok {
+			*problems = append(*problems, fmt.Sprintf("%s: duplicate resource copy id %q", path, id))
+		}
+		seenCopies[id] = struct{}{}
+		if item.Destination.IsZero() {
+			*problems = append(*problems, fmt.Sprintf("%s.destination is required", path))
+		}
+		repo := strings.ToLower(strings.TrimSpace(item.Source.Repo))
+		if repo == "" {
+			repo = "target"
+		}
+		if repo != "target" && repo != "git" {
+			*problems = append(*problems, fmt.Sprintf("%s.source.repo must be one of [target, git]", path))
+		}
+		if item.Source.Path.IsZero() {
+			*problems = append(*problems, fmt.Sprintf("%s.source.path is required", path))
+		}
+		if repo == "git" && item.Source.URL.IsZero() {
+			*problems = append(*problems, fmt.Sprintf("%s.source.url is required for source.repo=git", path))
+		}
+	}
 }
 
 // validateBashRunTemplate проверяет общие правила для run-шаблонов shell/plan шагов.
