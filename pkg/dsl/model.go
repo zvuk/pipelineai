@@ -81,6 +81,9 @@ type ProjectConfig struct {
 
 	InstructionBlocks []InstructionBlock `yaml:"instruction_blocks,omitempty"`
 	ResourceCopy      []ResourceCopy     `yaml:"resource_copy,omitempty"`
+	// Settings — именованные строковые настройки сценария, доступные в шаблонах
+	// через .project.settings.
+	Settings map[string]string `yaml:"settings,omitempty"`
 
 	// Resources — runtime-карта id -> destination после resource_copy.
 	Resources map[string]string `yaml:"-"`

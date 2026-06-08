@@ -12,13 +12,18 @@ import (
 // StaticTemplateContext возвращает project-контекст без рендера instruction blocks.
 func StaticTemplateContext(pc *dsl.ProjectConfig) map[string]any {
 	resources := map[string]string{}
+	settings := map[string]string{}
 	if pc != nil {
 		for k, v := range pc.Resources {
 			resources[k] = v
 		}
+		for k, v := range pc.Settings {
+			settings[k] = v
+		}
 	}
 	return map[string]any{
 		"resources":          resources,
+		"settings":           settings,
 		"instruction_blocks": map[string]string{},
 	}
 }

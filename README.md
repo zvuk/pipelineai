@@ -263,10 +263,13 @@ steps:
 
 `project_config` — общий механизм расширения сценариев без привязки к конкретному flow.  
 Он позволяет вынести повторяемые инструкции и подготовку файлов из prompt в YAML.
+Дополнительно можно задавать строковые `settings`, которые доступны в шаблонах как `.project.settings`.
 
 ```yaml
 project_config:
   enabled: true
+  settings:
+    ai_review_mode: "commenter"
   instruction_blocks:
     - id: review_rules
       title: "Review rules"
@@ -295,6 +298,7 @@ project_config:
 
 ```gotemplate
 {{ index .project.instruction_blocks "review_rules" }}
+{{ index .project.settings "ai_review_mode" }}
 ```
 
 Repo-level override загружается из `.pai-config.yaml` в рабочем каталоге. Также можно указать:
@@ -304,7 +308,7 @@ Repo-level override загружается из `.pai-config.yaml` в рабоч
 - `PAI_CONFIG_REPO_TOKEN_ENV` — имя env-переменной с токеном;
 - fallback токены: `PAI_CONFIG_REPO_TOKEN`, `PAI_GIT_API_TOKEN`, `CI_JOB_TOKEN`, `GITHUB_TOKEN`.
 
-Override-файл может содержать корневые `instruction_blocks` и `resource_copy` или вложенный `project_config`. Блоки инструкций с тем же `id` по умолчанию дополняют базовый блок (`mode: append`); `mode: replace` заменяет его целиком.
+Override-файл может содержать корневые `instruction_blocks`, `resource_copy`, `settings` или вложенный `project_config`. Блоки инструкций с тем же `id` по умолчанию дополняют базовый блок (`mode: append`); `mode: replace` заменяет его целиком. Для `settings` значения из override заменяют базовые значения с тем же ключом.
 
 Пример repo-level override для Playwright лежит в `ci/configs/pai-config.example.yml`.
 

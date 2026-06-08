@@ -228,6 +228,11 @@ func validateProjectConfig(pc *ProjectConfig, problems *[]string) {
 	if pc == nil {
 		return
 	}
+	for key := range pc.Settings {
+		if strings.TrimSpace(key) == "" {
+			*problems = append(*problems, "project_config.settings contains empty key")
+		}
+	}
 	seenBlocks := make(map[string]struct{}, len(pc.InstructionBlocks))
 	for i, block := range pc.InstructionBlocks {
 		path := fmt.Sprintf("project_config.instruction_blocks[%d]", i)

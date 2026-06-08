@@ -49,6 +49,8 @@ resource_copy:
       repo: target
       path: repo-rules
     destination: .pai/rules
+settings:
+  ai_review_mode: reviewer
 `
 	if err := os.WriteFile(filepath.Join(tmp, ".pai-config.yaml"), []byte(strings.TrimSpace(override)+"\n"), 0o644); err != nil {
 		t.Fatalf("write override: %v", err)
@@ -74,6 +76,9 @@ resource_copy:
 					},
 				},
 			},
+			Settings: map[string]string{
+				"ai_review_mode": "commenter",
+			},
 		},
 	}
 
@@ -90,6 +95,12 @@ resource_copy:
 		},
 	}
 	templateCtx["project"] = StaticTemplateContext(cfg.ProjectConfig)
+	staticProjectCtx := templateCtx["project"].(map[string]any)
+	settings := staticProjectCtx["settings"].(map[string]string)
+	if got := settings["ai_review_mode"]; got != "reviewer" {
+		t.Fatalf("expected overridden review mode setting, got: %s", got)
+	}
+
 	projectCtx, err := TemplateContext(cfg.ProjectConfig, templateCtx)
 	if err != nil {
 		t.Fatalf("render template context: %v", err)

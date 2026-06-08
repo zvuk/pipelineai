@@ -28,6 +28,7 @@ type overrideFile struct {
 	ProjectConfig     *dsl.ProjectConfig     `yaml:"project_config,omitempty"`
 	InstructionBlocks []dsl.InstructionBlock `yaml:"instruction_blocks,omitempty"`
 	ResourceCopy      []dsl.ResourceCopy     `yaml:"resource_copy,omitempty"`
+	Settings          map[string]string      `yaml:"settings,omitempty"`
 }
 
 // Prepare загружает repo-level override config и копирует объявленные ресурсы.
@@ -72,6 +73,7 @@ func shouldPrepare(pc *dsl.ProjectConfig) bool {
 	return pc.Enabled ||
 		len(pc.InstructionBlocks) > 0 ||
 		len(pc.ResourceCopy) > 0 ||
+		len(pc.Settings) > 0 ||
 		!pc.LocalPath.IsZero() ||
 		pc.Remote != nil
 }
@@ -162,6 +164,9 @@ func readProjectConfigFile(path string) (*dsl.ProjectConfig, error) {
 	if len(raw.ResourceCopy) > 0 {
 		out.ResourceCopy = mergeResourceCopy(out.ResourceCopy, raw.ResourceCopy)
 	}
+	if len(raw.Settings) > 0 {
+		out.Settings = mergeSettings(out.Settings, raw.Settings)
+	}
 	return out, nil
 }
 
@@ -250,6 +255,7 @@ func mergeProjectConfig(base *dsl.ProjectConfig, overlay *dsl.ProjectConfig) {
 	}
 	base.InstructionBlocks = mergeInstructionBlocks(base.InstructionBlocks, overlay.InstructionBlocks)
 	base.ResourceCopy = mergeResourceCopy(base.ResourceCopy, overlay.ResourceCopy)
+	base.Settings = mergeSettings(base.Settings, overlay.Settings)
 }
 
 func mergeInstructionBlocks(base []dsl.InstructionBlock, overlay []dsl.InstructionBlock) []dsl.InstructionBlock {
@@ -311,6 +317,28 @@ func mergeResourceCopy(base []dsl.ResourceCopy, overlay []dsl.ResourceCopy) []ds
 		}
 		index[id] = len(out)
 		out = append(out, item)
+	}
+	return out
+}
+
+func mergeSettings(base map[string]string, overlay map[string]string) map[string]string {
+	if len(base) == 0 && len(overlay) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(base)+len(overlay))
+	for k, v := range base {
+		key := strings.TrimSpace(k)
+		if key == "" {
+			continue
+		}
+		out[key] = strings.TrimSpace(v)
+	}
+	for k, v := range overlay {
+		key := strings.TrimSpace(k)
+		if key == "" {
+			continue
+		}
+		out[key] = strings.TrimSpace(v)
 	}
 	return out
 }
