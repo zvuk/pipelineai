@@ -3,6 +3,9 @@ version: 1
 # Example repo-level override. Put it into the target repository root as
 # .pai-config.yaml, or pass it via PAI_CONFIG_PATH / PAI_CONFIG_REPO_*.
 
+settings:
+  ai_review_mode: commenter
+
 resource_copy:
   - id: qa_rules
     source:
