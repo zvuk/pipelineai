@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -59,7 +60,10 @@ func (c *Collector) Enabled() bool {
 	if c == nil {
 		return false
 	}
-	return c.cfg.Enabled && (strings.TrimSpace(c.cfg.PushgatewayURL) != "" || strings.TrimSpace(c.cfg.FilePath) != "")
+	return c.cfg.Enabled &&
+		(strings.TrimSpace(c.cfg.PushgatewayURL) != "" ||
+			strings.TrimSpace(c.cfg.RemoteWriteURL) != "" ||
+			strings.TrimSpace(c.cfg.FilePath) != "")
 }
 
 // AddCommonLabel adds a label to all subsequent and rendered samples.
@@ -137,6 +141,11 @@ func (c *Collector) Flush(ctx context.Context) error {
 		grouping := c.groupingLabels(common)
 		body := RenderText(samples, common, grouping)
 		if err := PushGateway(ctx, endpoint, c.cfg.PushgatewayJob, grouping, body); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if endpoint := strings.TrimSpace(c.cfg.RemoteWriteURL); endpoint != "" {
+		if err := RemoteWrite(ctx, endpoint, samples, common, time.Now().UTC()); err != nil {
 			errs = append(errs, err)
 		}
 	}

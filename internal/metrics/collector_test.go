@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/golang/snappy"
 )
 
 func TestRenderTextMergesAndEscapesLabels(t *testing.T) {
@@ -100,5 +102,57 @@ func TestCollectorFlushesToFileAndPushgateway(t *testing.T) {
 	}
 	if gotPath != "/metrics/job/pipelineai-test/run_id/run-1" {
 		t.Fatalf("unexpected push path: %s", gotPath)
+	}
+}
+
+func TestCollectorFlushesToRemoteWrite(t *testing.T) {
+	var gotMethod string
+	var gotContentEncoding string
+	var gotContentType string
+	var gotVersion string
+	var decodedBody []byte
+	var decodeErr error
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotContentEncoding = r.Header.Get("Content-Encoding")
+		gotContentType = r.Header.Get("Content-Type")
+		gotVersion = r.Header.Get("X-Prometheus-Remote-Write-Version")
+		body, _ := io.ReadAll(r.Body)
+		decodedBody, decodeErr = snappy.Decode(nil, body)
+	}))
+	defer server.Close()
+
+	collector := New(Config{
+		Enabled:        true,
+		RemoteWriteURL: server.URL + "/api/v1/write",
+		Labels: map[string]string{
+			"run_id": "run-1",
+			"env":    "stage",
+		},
+	}, nil)
+	collector.Observe("pipelineai_test_metric", "test metric", "gauge", 2, map[string]string{"status": "ok"})
+
+	if err := collector.Flush(context.Background()); err != nil {
+		t.Fatalf("flush failed: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Fatalf("unexpected method: %s", gotMethod)
+	}
+	if gotContentEncoding != "snappy" {
+		t.Fatalf("unexpected content encoding: %s", gotContentEncoding)
+	}
+	if gotContentType != "application/x-protobuf" {
+		t.Fatalf("unexpected content type: %s", gotContentType)
+	}
+	if gotVersion != remoteWriteVersion {
+		t.Fatalf("unexpected remote write version: %s", gotVersion)
+	}
+	if decodeErr != nil {
+		t.Fatalf("decode remote write body: %v", decodeErr)
+	}
+	for _, want := range []string{"__name__", "pipelineai_test_metric", "env", "stage", "run_id", "run-1"} {
+		if !strings.Contains(string(decodedBody), want) {
+			t.Fatalf("remote write body is missing %q: %q", want, string(decodedBody))
+		}
 	}
 }

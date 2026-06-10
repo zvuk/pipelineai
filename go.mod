@@ -6,6 +6,7 @@ require (
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/caarlos0/env/v11 v11.4.0
 	github.com/daulet/tokenizers v1.26.0
+	github.com/golang/snappy v1.0.0
 	github.com/joho/godotenv v1.5.1
 	github.com/openai/openai-go/v2 v2.7.1
 	github.com/spf13/cobra v1.10.2

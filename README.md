@@ -71,6 +71,7 @@ PAI читает настройки LLM из `.env` (если он есть) и 
 - `LOG_LEVEL=debug|info|warn|error` — детализация логов
 - `PAI_METRICS_ENABLED=true|false` — включает экспорт метрик PipelineAI
 - `PAI_METRICS_PUSHGATEWAY_URL` — Pushgateway-compatible endpoint для Prometheus text exposition
+- `PAI_METRICS_REMOTE_WRITE_URL` — Prometheus remote_write endpoint
 - `PAI_METRICS_FILE` — локальный файл с метриками в Prometheus text format
 
 Для локальной сборки из этого репозитория рекомендуется `make build`: цель автоматически подтягивает `libtokenizers.a` и включает exact tokenizer backend (`tokenizers_hf`) для model-specific подсчёта токенов.
@@ -79,19 +80,19 @@ PAI читает настройки LLM из `.env` (если он есть) и 
 
 ### Метрики
 
-PipelineAI может отправлять run-local метрики в Prometheus Pushgateway-compatible endpoint или писать их в локальный файл:
+PipelineAI может отправлять run-local метрики в Prometheus remote_write endpoint, Prometheus Pushgateway-compatible endpoint или писать их в локальный файл:
 
 ```bash
 export PAI_METRICS_ENABLED=true
-export PAI_METRICS_PUSHGATEWAY_URL=http://localhost:9091
-export PAI_METRICS_PUSHGATEWAY_JOB=pipelineai
+export PAI_METRICS_REMOTE_WRITE_URL=http://localhost:8428/api/v1/write
 export PAI_METRICS_LABELS="project=my-service,env=ci"
 pipelineai run --config ci/configs/example.yml
 ```
 
 Основные переменные:
 
-- `PAI_METRICS_ENABLED` — явное включение/выключение экспорта. Если переменная не задана, экспорт включается автоматически при наличии `PAI_METRICS_PUSHGATEWAY_URL` или `PAI_METRICS_FILE`.
+- `PAI_METRICS_ENABLED` — явное включение/выключение экспорта. Если переменная не задана, экспорт включается автоматически при наличии `PAI_METRICS_REMOTE_WRITE_URL`, `PAI_METRICS_PUSHGATEWAY_URL` или `PAI_METRICS_FILE`.
+- `PAI_METRICS_REMOTE_WRITE_URL` — endpoint для `POST` в формате Prometheus remote_write v1 (`prometheus.WriteRequest`, snappy-compressed protobuf).
 - `PAI_METRICS_PUSHGATEWAY_URL` — endpoint для `PUT /metrics/job/...`.
 - `PAI_METRICS_PUSHGATEWAY_JOB` — имя job в Pushgateway, по умолчанию `pipelineai`.
 - `PAI_METRICS_FILE` — путь к локальному Prometheus text файлу.

@@ -14,6 +14,7 @@ type Config struct {
 	Enabled        bool
 	PushgatewayURL string
 	PushgatewayJob string
+	RemoteWriteURL string
 	FilePath       string
 	ExtraJSONPath  string
 	Labels         map[string]string
@@ -25,15 +26,17 @@ type Config struct {
 func LoadConfigFromEnv() Config {
 	enabled, enabledSet := lookupBoolEnv("PAI_METRICS_ENABLED")
 	pushgatewayURL := strings.TrimSpace(os.Getenv("PAI_METRICS_PUSHGATEWAY_URL"))
+	remoteWriteURL := strings.TrimSpace(os.Getenv("PAI_METRICS_REMOTE_WRITE_URL"))
 	filePath := strings.TrimSpace(os.Getenv("PAI_METRICS_FILE"))
 	if !enabledSet {
-		enabled = pushgatewayURL != "" || filePath != ""
+		enabled = pushgatewayURL != "" || remoteWriteURL != "" || filePath != ""
 	}
 
 	cfg := Config{
 		Enabled:        enabled,
 		PushgatewayURL: pushgatewayURL,
 		PushgatewayJob: envOrDefault("PAI_METRICS_PUSHGATEWAY_JOB", "pipelineai"),
+		RemoteWriteURL: remoteWriteURL,
 		FilePath:       filePath,
 		ExtraJSONPath:  strings.TrimSpace(os.Getenv("PAI_METRICS_EXTRA_JSON")),
 		Labels:         parseLabels(os.Getenv("PAI_METRICS_LABELS")),
