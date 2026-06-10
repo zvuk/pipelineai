@@ -20,6 +20,7 @@ func (e *Executor) annotateBashStepError(stepType string, stepID string, err err
 	if !errors.As(err, &bashErr) {
 		return err
 	}
+	e.recordShellErrorMetric(stepID, stepType, bashErr.ExitCode, bashErr.TimedOut)
 	artifactPath, writeErr := e.writeBashFailureArtifact(stepType, stepID, bashErr)
 	if writeErr == nil {
 		bashErr.ArtifactPath = artifactPath

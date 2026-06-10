@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/zvuk/pipelineai/internal/metrics"
 	"github.com/zvuk/pipelineai/internal/runtime/executor"
 	"github.com/zvuk/pipelineai/internal/runtime/llm"
 	"github.com/zvuk/pipelineai/internal/runtime/projectconfig"
@@ -66,10 +67,21 @@ type runOptions struct {
 	Err             io.Writer
 }
 
-func runStep(ctx context.Context, opts runOptions) error {
+func runStep(ctx context.Context, opts runOptions) (retErr error) {
 	if opts.Log == nil {
 		opts.Log = slog.Default()
 	}
+	started := time.Now()
+	metricsCollector := metrics.New(metrics.LoadConfigFromEnv(), opts.Log)
+	metricsCollector.RunStart("", "", opts.ConfigPath, opts.StepID, opts.ArtifactDir, started)
+	defer func() {
+		metricsCollector.RunFinish(started, retErr)
+		flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := metricsCollector.Flush(flushCtx); err != nil {
+			opts.Log.Warn("failed to flush metrics", slog.String("error", err.Error()))
+		}
+	}()
 
 	cfg, err := dsl.LoadFile(opts.ConfigPath)
 	if err != nil {
@@ -113,6 +125,8 @@ func runStep(ctx context.Context, opts runOptions) error {
 	cfg.Agent.Model = model
 	cfg.Agent.OpenAI.BaseURL = baseURL
 	cfg.Agent.OpenAI.APIKeyEnv = apiKeyEnv
+	metricsCollector.AddCommonLabel("agent", strings.TrimSpace(cfg.Agent.Name))
+	metricsCollector.AddCommonLabel("model", model)
 
 	modelCfg := llm.ModelConfig{
 		BaseURL:        baseURL,
@@ -131,6 +145,7 @@ func runStep(ctx context.Context, opts runOptions) error {
 		artifactDir = cfg.Agent.ArtifactDir
 	}
 	cfg.Agent.ArtifactDir = artifactDir
+	metricsCollector.AddCommonLabel("artifact_dir", artifactDir)
 
 	// INFO: старт сценария — базовые параметры
 	opts.Log.Info("scenario start",
@@ -148,6 +163,7 @@ func runStep(ctx context.Context, opts runOptions) error {
 	if err != nil {
 		return err
 	}
+	exec.SetMetrics(metricsCollector)
 
 	// Рассчитываем таймаут сценария
 	scenarioTO, err := scenarioTimeout(cfg, opts.StepID)

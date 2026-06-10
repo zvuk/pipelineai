@@ -69,10 +69,50 @@ PAI читает настройки LLM из `.env` (если он есть) и 
 - `PAI_LOG_FORMAT=human|json` — формат логов CLI, по умолчанию `human`
 - `PAI_LOG_COLOR=auto|always|never` — цветной вывод для human-логов
 - `LOG_LEVEL=debug|info|warn|error` — детализация логов
+- `PAI_METRICS_ENABLED=true|false` — включает экспорт метрик PipelineAI
+- `PAI_METRICS_PUSHGATEWAY_URL` — Pushgateway-compatible endpoint для Prometheus text exposition
+- `PAI_METRICS_FILE` — локальный файл с метриками в Prometheus text format
 
 Для локальной сборки из этого репозитория рекомендуется `make build`: цель автоматически подтягивает `libtokenizers.a` и включает exact tokenizer backend (`tokenizers_hf`) для model-specific подсчёта токенов.
 
 Если собирать бинарь напрямую через `go build`/`go install` без тега `tokenizers_hf`, PAI всё равно будет работать, но для неизвестных или неподдержанных exact-backend моделей переключится на byte-based fallback для предрасчётов.
+
+### Метрики
+
+PipelineAI может отправлять run-local метрики в Prometheus Pushgateway-compatible endpoint или писать их в локальный файл:
+
+```bash
+export PAI_METRICS_ENABLED=true
+export PAI_METRICS_PUSHGATEWAY_URL=http://localhost:9091
+export PAI_METRICS_PUSHGATEWAY_JOB=pipelineai
+export PAI_METRICS_LABELS="project=my-service,env=ci"
+pipelineai run --config ci/configs/example.yml
+```
+
+Основные переменные:
+
+- `PAI_METRICS_ENABLED` — явное включение/выключение экспорта. Если переменная не задана, экспорт включается автоматически при наличии `PAI_METRICS_PUSHGATEWAY_URL` или `PAI_METRICS_FILE`.
+- `PAI_METRICS_PUSHGATEWAY_URL` — endpoint для `PUT /metrics/job/...`.
+- `PAI_METRICS_PUSHGATEWAY_JOB` — имя job в Pushgateway, по умолчанию `pipelineai`.
+- `PAI_METRICS_FILE` — путь к локальному Prometheus text файлу.
+- `PAI_METRICS_LABELS` — дополнительные labels через запятую: `key=value,key2=value2`.
+- `PAI_METRICS_GROUPING_LABELS` — grouping labels для Pushgateway.
+- `PAI_METRICS_GROUP_BY_RUN` — добавлять уникальный `run_id` в grouping labels, по умолчанию `true`.
+- `PAI_METRICS_EXTRA_JSON` — путь к JSON-файлу с дополнительными доменными метриками сценария.
+
+Runtime сам пишет метрики запусков, шагов, matrix items, LLM requests/tokens, tool calls и shell errors. Сценарии могут добавить свои метрики через `PAI_METRICS_EXTRA_JSON`:
+
+```json
+[
+  {
+    "name": "pipelineai_custom_reviews",
+    "help": "Custom scenario review findings.",
+    "type": "gauge",
+    "value": 3,
+    "labels": {"severity": "warning"}
+  }
+]
+```
 
 ---
 

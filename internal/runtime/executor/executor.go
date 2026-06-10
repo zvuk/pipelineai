@@ -30,6 +30,7 @@ type Executor struct {
 	muSteps   sync.RWMutex
 	tools     *registry.Registry
 	tokenizer tokens.Counter
+	metrics   metricsSink
 	// produced — накопленные выходы шагов для подстановки в шаблоны последующих шагов
 	produced map[string]map[string]ioValue
 	muProd   sync.RWMutex
@@ -45,6 +46,7 @@ func (e *Executor) runStepWithPolicy(ctx context.Context, step dsl.Step, stepID 
 	}
 
 	var lastErr error
+	started := time.Now()
 
 	for attempt := 1; attempt <= attempts; attempt++ {
 		stepTO := e.stepTimeoutFor(step)
@@ -61,6 +63,7 @@ func (e *Executor) runStepWithPolicy(ctx context.Context, step dsl.Step, stepID 
 
 		err := e.runSingleStep(stepCtx, step, stepID, parallel, name)
 		if err == nil {
+			e.recordStepMetric(stepID, step.Type, "success", time.Since(started))
 			return nil
 		}
 
@@ -83,6 +86,7 @@ func (e *Executor) runStepWithPolicy(ctx context.Context, step dsl.Step, stepID 
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
+				e.recordStepMetric(stepID, step.Type, "error", time.Since(started))
 				return ctx.Err()
 			}
 		}
@@ -98,9 +102,11 @@ func (e *Executor) runStepWithPolicy(ctx context.Context, step dsl.Step, stepID 
 			slog.String("error", lastErr.Error()),
 		)
 		// Сценарий продолжается
+		e.recordStepMetric(stepID, step.Type, "allowed_failure", time.Since(started))
 		return nil
 	}
 
+	e.recordStepMetric(stepID, step.Type, "error", time.Since(started))
 	return lastErr
 }
 

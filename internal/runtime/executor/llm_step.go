@@ -86,11 +86,13 @@ func (e *Executor) RunLLMStep(ctx context.Context, stepID string, extra map[stri
 	tokenMetrics := newStepTokenMetrics(e.cfg, &step, profile)
 	resp, finalMessages, err := e.runAgentLoop(ctx, req, &step, toolTimeout, shellAppr, applyAppr, tokenMetrics)
 	if err != nil {
+		e.recordLLMMetric(stepID, "error", tokenMetrics)
 		record, _ := buildLLMErrorArtifactRecord(systemPrompt, userPrompt, resp, finalMessages, tokenMetrics, err)
 		_, _ = e.artifacts.WriteLLMResponse(stepID, record)
 		return llm.ChatCompletionResponse{}, "", err
 	}
 	if err := validateLLMFinalResponse(normalizedValidatorName(&step), resp, finalMessages, extra); err != nil {
+		e.recordLLMMetric(stepID, "validation_error", tokenMetrics)
 		record, _ := buildLLMErrorArtifactRecord(systemPrompt, userPrompt, resp, finalMessages, tokenMetrics, err)
 		_, _ = e.artifacts.WriteLLMResponse(stepID, record)
 		return llm.ChatCompletionResponse{}, "", err
@@ -100,11 +102,13 @@ func (e *Executor) RunLLMStep(ctx context.Context, stepID string, extra map[stri
 	record, _ := buildLLMArtifactRecord(systemPrompt, userPrompt, resp, finalMessages, tokenMetrics)
 	path, err := e.artifacts.WriteLLMResponse(stepID, record)
 	if err != nil {
+		e.recordLLMMetric(stepID, "artifact_error", tokenMetrics)
 		return llm.ChatCompletionResponse{}, "", err
 	}
 
 	// Обрабатываем outputs шага (file/log) и регистрируем их для последующих шагов
 	if err := e.processLLMOutputs(step, resp, inputs, extra); err != nil {
+		e.recordLLMMetric(stepID, "outputs_error", tokenMetrics)
 		return llm.ChatCompletionResponse{}, "", err
 	}
 
@@ -118,6 +122,7 @@ func (e *Executor) RunLLMStep(ctx context.Context, stepID string, extra map[stri
 		slog.String("answer", crop(finalText, 150)),
 	)
 
+	e.recordLLMMetric(stepID, "success", tokenMetrics)
 	return resp, path, nil
 }
 
@@ -368,6 +373,7 @@ func (e *Executor) updateChatLogIfDebug(ctx context.Context, stepID string, mess
 // logToolExecution пишет единые INFO/DEBUG логи выполнения инструмента.
 func (e *Executor) logToolExecution(ctx context.Context, stepID, toolName, args string, ok bool, toolError string, exitCode int, stderr, stdout string) {
 	argsShort := crop(strings.TrimSpace(args), 90)
+	e.recordToolMetric(stepID, toolName, ok)
 	e.log.InfoContext(ctx, "tool result",
 		slog.String("step", stepID),
 		slog.String("tool", toolName),
