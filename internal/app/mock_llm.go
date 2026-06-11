@@ -5,10 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -31,8 +29,7 @@ func newMockLLMCommand(log *slog.Logger) *cobra.Command {
 				log = slog.Default()
 			}
 
-			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-			defer stop()
+			ctx := cmd.Context()
 
 			srv, err := mockllm.Start(addr, log)
 			if err != nil {
@@ -56,7 +53,7 @@ func newMockLLMCommand(log *slog.Logger) *cobra.Command {
 
 			<-ctx.Done()
 
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 			defer cancel()
 			_ = srv.Shutdown(shutdownCtx)
 			return nil

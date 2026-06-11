@@ -242,6 +242,7 @@ func (e *Executor) RunMatrixStep(ctx context.Context, stepID string, parallel in
 			status["finished_at"] = finished.Format(time.RFC3339Nano)
 			// Запишем статус в .agent/artifacts/items/<id>/status.json
 			_ = e.writeItemStatus(itemID, status)
+			e.recordMatrixItemMetric(stepID, runStepID, itemID, fmt.Sprint(status["status"]), finished.Sub(started))
 			e.log.Info("matrix item end",
 				slog.String("step", stepID),
 				slog.String("run_step", runStepID),
