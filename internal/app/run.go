@@ -76,7 +76,7 @@ func runStep(ctx context.Context, opts runOptions) (retErr error) {
 	metricsCollector.RunStart("", "", opts.ConfigPath, opts.StepID, opts.ArtifactDir, started)
 	defer func() {
 		metricsCollector.RunFinish(started, retErr)
-		flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
 		if err := metricsCollector.Flush(flushCtx); err != nil {
 			opts.Log.Warn("failed to flush metrics", slog.String("error", err.Error()))

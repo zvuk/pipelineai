@@ -2,9 +2,13 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -28,7 +32,10 @@ func RunCLI(args []string, stdout, stderr io.Writer) int {
 	root := newRootCommand(log, stdout, stderr)
 	root.SetArgs(args)
 
-	if err := root.Execute(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := root.ExecuteContext(ctx); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
