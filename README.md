@@ -97,6 +97,7 @@ pipelineai run --config ci/configs/example.yml
 - `PAI_METRICS_PUSHGATEWAY_JOB` — имя job в Pushgateway, по умолчанию `pipelineai`.
 - `PAI_METRICS_FILE` — путь к локальному Prometheus text файлу.
 - `PAI_METRICS_LABELS` — дополнительные labels через запятую: `key=value,key2=value2`.
+- `PAI_METRICS_ALLOWED_LABELS` — необязательный allowlist labels через запятую. Если задан, все остальные labels отбрасываются перед экспортом.
 - `PAI_METRICS_GROUPING_LABELS` — grouping labels для Pushgateway.
 - `PAI_METRICS_GROUP_BY_RUN` — добавлять уникальный `run_id` в grouping labels, по умолчанию `true`.
 - `PAI_METRICS_EXTRA_JSON` — путь к JSON-файлу с дополнительными доменными метриками сценария.

@@ -44,7 +44,7 @@ func New(cfg Config, log *slog.Logger) *Collector {
 	}
 	common := make(map[string]string, len(cfg.Labels))
 	for k, v := range cfg.Labels {
-		if key := sanitizeLabelName(k); key != "" && strings.TrimSpace(v) != "" {
+		if key := sanitizeLabelName(k); key != "" && labelAllowed(cfg.AllowedLabels, key) && strings.TrimSpace(v) != "" {
 			common[key] = strings.TrimSpace(v)
 		}
 	}
@@ -73,7 +73,7 @@ func (c *Collector) AddCommonLabel(key, value string) {
 	}
 	key = sanitizeLabelName(key)
 	value = strings.TrimSpace(value)
-	if key == "" || value == "" {
+	if key == "" || value == "" || !c.labelAllowed(key) {
 		return
 	}
 	c.mu.Lock()
@@ -99,7 +99,7 @@ func (c *Collector) Observe(name, help, typ string, value float64, labels map[st
 		Help:   strings.TrimSpace(help),
 		Type:   typ,
 		Value:  value,
-		Labels: cleanLabels(labels),
+		Labels: c.cleanLabels(labels),
 	})
 	c.mu.Unlock()
 }
@@ -124,7 +124,7 @@ func (c *Collector) Flush(ctx context.Context) error {
 	if err != nil {
 		c.log.WarnContext(ctx, "failed to read extra metrics", slog.String("error", err.Error()))
 	} else if len(extra) > 0 {
-		samples = append(samples, extra...)
+		samples = append(samples, c.filterSamples(extra)...)
 	}
 	if len(samples) == 0 {
 		return nil
@@ -172,7 +172,7 @@ func (c *Collector) groupingLabels(common map[string]string) map[string]string {
 	for k, v := range c.cfg.GroupingLabels {
 		key := sanitizeLabelName(k)
 		value := strings.TrimSpace(v)
-		if key == "" || value == "" {
+		if key == "" || value == "" || !c.labelAllowed(key) {
 			continue
 		}
 		grouping[key] = value
@@ -183,6 +183,52 @@ func (c *Collector) groupingLabels(common map[string]string) map[string]string {
 		}
 	}
 	return grouping
+}
+
+func (c *Collector) filterSamples(samples []Sample) []Sample {
+	if c == nil || len(samples) == 0 {
+		return samples
+	}
+	out := make([]Sample, 0, len(samples))
+	for _, sample := range samples {
+		sample.Labels = c.cleanLabels(sample.Labels)
+		out = append(out, sample)
+	}
+	return out
+}
+
+func (c *Collector) cleanLabels(labels map[string]string) map[string]string {
+	if c == nil {
+		return cleanLabels(labels)
+	}
+	if len(labels) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(labels))
+	for k, v := range labels {
+		key := sanitizeLabelName(k)
+		value := strings.TrimSpace(v)
+		if key == "" || value == "" || !c.labelAllowed(key) {
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+func (c *Collector) labelAllowed(key string) bool {
+	if c == nil {
+		return true
+	}
+	return labelAllowed(c.cfg.AllowedLabels, key)
+}
+
+func labelAllowed(allowed map[string]struct{}, key string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	_, ok := allowed[key]
+	return ok
 }
 
 func cleanLabels(labels map[string]string) map[string]string {

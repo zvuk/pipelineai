@@ -105,6 +105,75 @@ func TestCollectorFlushesToFileAndPushgateway(t *testing.T) {
 	}
 }
 
+func TestCollectorFiltersLabelsWhenAllowlistConfigured(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	filePath := dir + "/metrics.prom"
+	collector := New(Config{
+		Enabled:        true,
+		PushgatewayURL: server.URL,
+		PushgatewayJob: "pipelineai-test",
+		FilePath:       filePath,
+		Labels: map[string]string{
+			"project":  "service-a",
+			"scenario": "ai_review",
+			"run_id":   "run-1",
+			"env":      "stage",
+		},
+		GroupingLabels: map[string]string{
+			"project": "service-a",
+			"run_id":  "run-1",
+		},
+		AllowedLabels: map[string]struct{}{
+			"project":  {},
+			"scenario": {},
+			"status":   {},
+			"step":     {},
+			"kind":     {},
+		},
+	}, nil)
+	collector.Observe("pipelineai_test_metric", "test metric", "gauge", 2, map[string]string{
+		"status":  "ok",
+		"step":    "review",
+		"kind":    "total",
+		"item_id": "file.go",
+		"tool":    "shell",
+	})
+
+	if err := collector.Flush(context.Background()); err != nil {
+		t.Fatalf("flush failed: %v", err)
+	}
+	fileBody, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("read metrics file: %v", err)
+	}
+	body := string(fileBody)
+	for _, want := range []string{
+		`project="service-a"`,
+		`scenario="ai_review"`,
+		`status="ok"`,
+		`step="review"`,
+		`kind="total"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("filtered metrics are missing %q: %s", want, body)
+		}
+	}
+	for _, blocked := range []string{"run_id", "env", "item_id", "tool"} {
+		if strings.Contains(body, blocked) {
+			t.Fatalf("filtered metrics contain high-cardinality label %q: %s", blocked, body)
+		}
+	}
+	if gotPath != "/metrics/job/pipelineai-test/project/service-a" {
+		t.Fatalf("unexpected filtered push path: %s", gotPath)
+	}
+}
+
 func TestCollectorFlushesToRemoteWrite(t *testing.T) {
 	var gotMethod string
 	var gotContentEncoding string
