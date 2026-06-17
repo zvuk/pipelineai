@@ -19,6 +19,7 @@ type Config struct {
 	ExtraJSONPath  string
 	Labels         map[string]string
 	GroupingLabels map[string]string
+	AllowedLabels  map[string]struct{}
 	Timeout        time.Duration
 }
 
@@ -41,6 +42,7 @@ func LoadConfigFromEnv() Config {
 		ExtraJSONPath:  strings.TrimSpace(os.Getenv("PAI_METRICS_EXTRA_JSON")),
 		Labels:         parseLabels(os.Getenv("PAI_METRICS_LABELS")),
 		GroupingLabels: parseLabels(os.Getenv("PAI_METRICS_GROUPING_LABELS")),
+		AllowedLabels:  parseLabelSet(os.Getenv("PAI_METRICS_ALLOWED_LABELS")),
 		Timeout:        parseDurationEnv("PAI_METRICS_TIMEOUT", 5*time.Second),
 	}
 
@@ -123,6 +125,21 @@ func parseLabels(raw string) map[string]string {
 			continue
 		}
 		labels[key] = value
+	}
+	return labels
+}
+
+func parseLabelSet(raw string) map[string]struct{} {
+	labels := map[string]struct{}{}
+	for _, part := range strings.Split(raw, ",") {
+		key := sanitizeLabelName(part)
+		if key == "" {
+			continue
+		}
+		labels[key] = struct{}{}
+	}
+	if len(labels) == 0 {
+		return nil
 	}
 	return labels
 }
