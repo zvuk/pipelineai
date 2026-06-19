@@ -6,7 +6,7 @@ ARG GOPROXY="https://proxy.golang.org,direct"
 ARG TOKENIZERS_LIB_VERSION="1.26.0"
 RUN go env -w GOPROXY=${GOPROXY}
 
-ENV SRC_VERSION=1.0.4
+ENV SRC_VERSION=1.0.5
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -41,7 +41,7 @@ RUN go install golang.org/x/tools/cmd/goimports@latest
 
 COPY --from=build /out/pipelineai /usr/local/bin/pipelineai
 
-ENV CONFIG_VERSION=1.0.0
+ENV CONFIG_VERSION=1.0.1
 
 RUN mkdir -p /usr/local/share/pipelineai/configs /usr/local/share/pipelineai/prompts /usr/local/share/pipelineai/rules
 
